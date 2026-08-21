@@ -21,6 +21,7 @@ type Config struct {
 	WebFetchEnabled   bool
 	WebFetchTimeout   time.Duration
 	WebFetchMaxBytes  int64
+	WebFetchMaxText   int64
 	WebFetchAllowlist []string // empty = any URL (best-effort)
 
 	// OIDC (authentication via the external SSO).
@@ -63,6 +64,7 @@ func DefaultConfig() *Config {
 		WebFetchEnabled:   envBool("RC_WEBFETCH", true),
 		WebFetchTimeout:   15 * time.Second,
 		WebFetchMaxBytes:  512 << 10,
+		WebFetchMaxText:   32 << 10,
 		WebFetchAllowlist: splitList(envOr("RC_WEBFETCH_ALLOW", "")),
 
 		OIDCIssuer:       envOr("RC_OIDC_ISSUER", "https://sso.harisskiadas.com"),
