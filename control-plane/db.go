@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"database/sql"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -47,7 +48,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
   student_id TEXT NOT NULL REFERENCES students(id),
   title      TEXT,
-  created_at INTEGER NOT NULL
+  committed  INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_student ON sessions(student_id);
 
@@ -96,5 +100,19 @@ CREATE TABLE IF NOT EXISTS model_rates (
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
+	// Idempotent upgrades for databases created before the columns existed.
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN committed INTEGER NOT NULL DEFAULT 0"); err != nil && !isDupColumn(err) {
+		return err
+	}
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN deleted_at INTEGER"); err != nil && !isDupColumn(err) {
+		return err
+	}
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"); err != nil && !isDupColumn(err) {
+		return err
+	}
 	return nil
+}
+
+func isDupColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }

@@ -48,12 +48,17 @@ type UsageEvent struct {
 }
 
 // Session is a student chat session, managed by the control plane (not by a
-// separate agent runtime).
+// separate agent runtime). Sessions begin as drafts (committed=false) and only
+// become visible in the sidebar once committed. Soft-deleted sessions keep
+// their row for admin review but never appear to students.
 type Session struct {
 	ID        string
 	StudentID string
 	Title     string
+	Committed bool
+	Deleted   bool
 	CreatedAt int64
+	UpdatedAt int64
 }
 
 // Message is a single persisted chat turn.
@@ -136,53 +141,113 @@ func (a *App) SetActive(ctx context.Context, email string, active bool) error {
 
 func (a *App) CreateSession(ctx context.Context, studentID, title string) (*Session, error) {
 	id := newID()
+	now := time.Now().Unix()
 	_, err := a.db.ExecContext(ctx,
-		`INSERT INTO sessions(id, student_id, title, created_at) VALUES(?,?,?,?)`,
-		id, studentID, title, time.Now().Unix())
+		`INSERT INTO sessions(id, student_id, title, committed, created_at, updated_at) VALUES(?,?,?,0,?,?)`,
+		id, studentID, title, now, now)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{ID: id, StudentID: studentID, Title: title}, nil
+	return &Session{ID: id, StudentID: studentID, Title: title, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (a *App) Session(ctx context.Context, id string) (*Session, error) {
+// scanSession scans a session row in the canonical column order.
+func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	s := &Session{}
-	err := a.db.QueryRowContext(ctx,
-		`SELECT id, student_id, title, created_at FROM sessions WHERE id=?`, id).Scan(&s.ID, &s.StudentID, &s.Title, &s.CreatedAt)
+	var committed, deleted int
+	err := row.Scan(&s.ID, &s.StudentID, &s.Title, &committed, &deleted, &s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	s.Committed = committed != 0
+	s.Deleted = deleted != 0
 	return s, nil
 }
 
+func (a *App) Session(ctx context.Context, id string) (*Session, error) {
+	return scanSession(a.db.QueryRowContext(ctx,
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions WHERE id=?`, id))
+}
+
+// ListSessions returns the student's committed, non-deleted sessions, most
+// recently active first. Drafts and soft-deleted sessions are excluded.
 func (a *App) ListSessions(ctx context.Context, studentID string) ([]Session, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, student_id, title, created_at FROM sessions WHERE student_id=? ORDER BY created_at DESC`, studentID)
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions
+		 WHERE student_id=? AND committed=1 AND deleted_at IS NULL ORDER BY updated_at DESC`, studentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Session
 	for rows.Next() {
-		s := Session{}
-		if err := rows.Scan(&s.ID, &s.StudentID, &s.Title, &s.CreatedAt); err != nil {
+		s := &Session{}
+		var committed, deleted int
+		if err := rows.Scan(&s.ID, &s.StudentID, &s.Title, &committed, &deleted, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		s.Committed = committed != 0
+		s.Deleted = deleted != 0
+		out = append(out, *s)
 	}
 	return out, rows.Err()
 }
 
-// AddMessage appends a turn (role: user|assistant) and returns its persisted
-// record. Returns an error if the session does not belong to the student.
+// LatestSession returns the student's most recently active non-deleted session,
+// draft or committed, or nil if the student has none.
+func (a *App) LatestSession(ctx context.Context, studentID string) (*Session, error) {
+	return scanSession(a.db.QueryRowContext(ctx,
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions
+		 WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1`, studentID))
+}
+
+// CommitSession marks a draft as committed (visible in the sidebar).
+func (a *App) CommitSession(ctx context.Context, id string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE sessions SET committed=1 WHERE id=?`, id)
+	return err
+}
+
+// RenameSession sets a session title.
+func (a *App) RenameSession(ctx context.Context, id, title string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE sessions SET title=? WHERE id=?`, title, id)
+	return err
+}
+
+// DeleteSession soft-deletes a session: it disappears from the sidebar and
+// rejects further messages, but the row (and its messages) remain for admins.
+func (a *App) DeleteSession(ctx context.Context, id string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE sessions SET deleted_at=? WHERE id=?`, time.Now().Unix(), id)
+	return err
+}
+
+// AddMessage appends a turn (role: user|assistant), bumps the session's
+// updated_at, and returns its persisted record. Returns an error if the
+// session does not belong to the student.
 func (a *App) AddMessage(ctx context.Context, sessionID, role, text string) error {
 	_, err := a.db.ExecContext(ctx,
 		`INSERT INTO messages(session_id, role, text, seq) SELECT ?,?,?, COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?`,
 		sessionID, role, text, sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = a.db.ExecContext(ctx,
+		`UPDATE sessions SET updated_at=? WHERE id=?`, time.Now().Unix(), sessionID)
 	return err
+}
+
+// CountMessages returns the number of messages in a session, optionally
+// filtered by role.
+func (a *App) CountMessages(ctx context.Context, sessionID, role string) (int, error) {
+	var n int
+	err := a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE session_id=? AND role=?`, sessionID, role).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (a *App) Messages(ctx context.Context, sessionID string) ([]Message, error) {
@@ -203,10 +268,11 @@ func (a *App) Messages(ctx context.Context, sessionID string) ([]Message, error)
 	return out, rows.Err()
 }
 
-// sessionOwned verifies a session exists and belongs to the student.
+// sessionOwned verifies a session exists, is not deleted, and belongs to the
+// student. Deleted sessions are treated as absent to students.
 func (a *App) sessionOwned(ctx context.Context, sessionID, studentID string) bool {
 	s, err := a.Session(ctx, sessionID)
-	return err == nil && s != nil && s.StudentID == studentID
+	return err == nil && s != nil && !s.Deleted && s.StudentID == studentID
 }
 
 // --- snapshots / usage / cost ---
