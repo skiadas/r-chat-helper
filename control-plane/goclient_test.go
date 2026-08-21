@@ -111,6 +111,27 @@ func TestClientInjectsConfiguredKeyAndForcesModel(t *testing.T) {
 	}
 }
 
+func TestToOpenAIMessagesUsesContextWhenSet(t *testing.T) {
+	c := newGoClient(DefaultConfig())
+	msgs := []Message{
+		{Role: "user", Text: "hi"},
+		{Role: "assistant", Text: "answer (display only)", Context: "answer\n\n[fetched url]\nraw fetched content"},
+	}
+	out := c.toOpenAIMessages(msgs, nil)
+	if len(out) != 3 { // system + user + assistant
+		t.Fatalf("got %d messages, want 3", len(out))
+	}
+	if out[1].Role != "user" || out[1].Content != "hi" {
+		t.Fatalf("user message wrong: %+v", out[1])
+	}
+	if out[2].Content != "answer\n\n[fetched url]\nraw fetched content" {
+		t.Fatalf("assistant did not use Context (tool output) for the model: %q", out[2].Content)
+	}
+	if strings.Contains(out[2].Content, "display only") {
+		t.Fatalf("assistant Context leaked the display-only text: %q", out[2].Content)
+	}
+}
+
 func TestWebFetchAllowlist(t *testing.T) {
 	body := "<html><body>dplyr docs</body></html>"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

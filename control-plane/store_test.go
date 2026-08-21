@@ -57,7 +57,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	// Soft delete: gone from list and sessionOwned, but row + messages remain.
-	if err := app.AddMessage(ctx, ses.ID, "user", "hi"); err != nil {
+	if err := app.AddMessage(ctx, ses.ID, "user", "hi", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.DeleteSession(ctx, ses.ID); err != nil {
@@ -95,7 +95,7 @@ func TestLatestSessionPrefersMostRecentActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Activity on `a` bumps a.updated_at past the second session's creation.
-	if err := app.AddMessage(ctx, a.ID, "user", "hello"); err != nil {
+	if err := app.AddMessage(ctx, a.ID, "user", "hello", ""); err != nil {
 		t.Fatal(err)
 	}
 	latest, err := app.LatestSession(ctx, "bob")

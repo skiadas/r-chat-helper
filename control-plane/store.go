@@ -61,12 +61,15 @@ type Session struct {
 	UpdatedAt int64
 }
 
-// Message is a single persisted chat turn.
+// Message is a single persisted chat turn. Context, when set, is the
+// model-facing content (e.g. an assistant turn with fetched tool output
+// inlined); Text is what the student sees.
 type Message struct {
 	ID        int64
 	SessionID string
 	Role      string
 	Text      string
+	Context   string
 	Seq       int64
 }
 
@@ -226,10 +229,14 @@ func (a *App) DeleteSession(ctx context.Context, id string) error {
 // AddMessage appends a turn (role: user|assistant), bumps the session's
 // updated_at, and returns its persisted record. Returns an error if the
 // session does not belong to the student.
-func (a *App) AddMessage(ctx context.Context, sessionID, role, text string) error {
+// AddMessage appends a turn (role: user|assistant) and bumps the session's
+// updated_at. context, when non-empty, is what the model sees in later turns
+// (e.g. an assistant turn with fetched tool output inlined) while text is what
+// the student's chat shows.
+func (a *App) AddMessage(ctx context.Context, sessionID, role, text, context string) error {
 	_, err := a.db.ExecContext(ctx,
-		`INSERT INTO messages(session_id, role, text, seq) SELECT ?,?,?, COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?`,
-		sessionID, role, text, sessionID)
+		`INSERT INTO messages(session_id, role, text, context, seq) SELECT ?,?,?,?, COALESCE(MAX(seq),0)+1 FROM messages WHERE session_id=?`,
+		sessionID, role, text, context, sessionID)
 	if err != nil {
 		return err
 	}
@@ -252,7 +259,7 @@ func (a *App) CountMessages(ctx context.Context, sessionID, role string) (int, e
 
 func (a *App) Messages(ctx context.Context, sessionID string) ([]Message, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, session_id, role, text, seq FROM messages WHERE session_id=? ORDER BY seq`, sessionID)
+		`SELECT id, session_id, role, text, COALESCE(context,''), seq FROM messages WHERE session_id=? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +267,7 @@ func (a *App) Messages(ctx context.Context, sessionID string) ([]Message, error)
 	var out []Message
 	for rows.Next() {
 		m := Message{}
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Text, &m.Seq); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Text, &m.Context, &m.Seq); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

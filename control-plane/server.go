@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -250,7 +251,15 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, map[string]any{"role": m.Role, "text": m.Text})
+		if m.Role != "assistant" {
+			out = append(out, map[string]any{"role": m.Role, "text": m.Text})
+			continue
+		}
+		html, err := renderMarkdown(m.Text)
+		if err != nil {
+			html = ""
+		}
+		out = append(out, map[string]any{"role": m.Role, "text": m.Text, "html": html})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -285,7 +294,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist the user turn.
-	if err := a.AddMessage(r.Context(), sid, "user", req.Text); err != nil {
+	if err := a.AddMessage(r.Context(), sid, "user", req.Text, ""); err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save message")
 		return
 	}
@@ -307,15 +316,28 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		log.Printf("cost: failed to record usage for %s/%s: %v", s.ID, sid, err)
 	}
 
-	// Persist the assistant turn (including tool outputs inline).
+	// Persist the assistant turn. The student's chat shows the model's answer
+	// plus a compact source line; the model-facing context inlines the fetched
+	// tool output so later turns still have the documentation available.
 	assistant := resp.Text
+	if len(resp.Tools) > 0 {
+		refs := make([]string, 0, len(resp.Tools))
+		for _, t := range resp.Tools {
+			refs = append(refs, t.InputText)
+		}
+		assistant += "\n\n(fetched: " + strings.Join(refs, ", ") + ")"
+	}
+	context := resp.Text
 	for _, t := range resp.Tools {
-		assistant += "\n\n[fetched " + t.InputText + "]\n" + truncate([]byte(t.Output), 4000)
+		context += "\n\n[fetched " + t.InputText + "]\n" + truncate([]byte(t.Output), 8000)
 	}
 	if assistant == "" {
 		assistant = "(no text response)"
 	}
-	if err := a.AddMessage(r.Context(), sid, "assistant", assistant); err != nil {
+	if context == "" {
+		context = assistant
+	}
+	if err := a.AddMessage(r.Context(), sid, "assistant", assistant, context); err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save response")
 		return
 	}
@@ -334,8 +356,10 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	spentAfter, _ := a.SpendByStudent(r.Context(), s.ID)
+	html, _ := renderMarkdown(assistant)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"assistant": assistant,
+		"html":      html,
 		"cost_usd":  float64(spentAfter-spentBefore) / 1e6,
 		"spent_usd": float64(spentAfter) / 1e6,
 		"committed": committed,

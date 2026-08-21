@@ -148,12 +148,17 @@ func (c *goClient) tools() []toolDef {
 }
 
 // toOpenAIMessages converts persisted chat messages plus any accumulated tool
-// turns into the OpenAI message sequence.
+// turns into the OpenAI message sequence. A message's Context field, when set,
+// is what the model sees (full tool output); its Text stays for the UI.
 func (c *goClient) toOpenAIMessages(msgs []Message, tools []toolResult) []chatMessage {
 	out := make([]chatMessage, 0, len(msgs)+len(tools)*2)
 	out = append(out, chatMessage{Role: "system", Content: systemPrompt})
 	for _, m := range msgs {
-		out = append(out, chatMessage{Role: m.Role, Content: m.Text})
+		content := m.Text
+		if m.Context != "" {
+			content = m.Context
+		}
+		out = append(out, chatMessage{Role: m.Role, Content: content})
 	}
 	for _, t := range tools {
 		// pretend a single synthetic "user" tool result turn appended after the

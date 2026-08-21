@@ -110,6 +110,9 @@ CREATE TABLE IF NOT EXISTS model_rates (
 	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"); err != nil && !isDupColumn(err) {
 		return err
 	}
+	if _, err := db.Exec("ALTER TABLE messages ADD COLUMN context TEXT"); err != nil && !isDupColumn(err) {
+		return err
+	}
 	return nil
 }
 
