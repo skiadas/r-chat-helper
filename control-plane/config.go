@@ -31,6 +31,7 @@ type Config struct {
 	PublicURL        string
 	CookieSecure     bool
 	AdminEmails      []string
+	DevEmail         string // dev only: auto sign-in identity while OIDC is unconfigured
 
 	sessionTTL time.Duration
 }
@@ -71,6 +72,7 @@ func DefaultConfig() *Config {
 		PublicURL:        strings.TrimRight(envOr("RC_PUBLIC_URL", ""), "/"),
 		CookieSecure:     envBool("RC_COOKIE_SECURE", true),
 		AdminEmails:      splitList(envOr("RC_ADMIN_EMAILS", "")),
+		DevEmail:         envOr("RC_DEV_EMAIL", ""),
 
 		sessionTTL: sessionTTL,
 	}

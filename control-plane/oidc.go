@@ -56,6 +56,10 @@ func (a *App) ensureOIDC() error {
 }
 
 func (a *App) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.OIDCClientSecret == "" && a.cfg.DevEmail != "" {
+		a.devLogin(w, r)
+		return
+	}
 	if err := a.ensureOIDC(); err != nil {
 		log.Printf("oidc: login unavailable: %v", err)
 		a.renderAuthError(w, "Sign-in is unavailable right now; try again shortly.")
@@ -77,6 +81,39 @@ func (a *App) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		oauth2.SetAuthURLParam("nonce", st.Nonce),
 	)
 	http.Redirect(w, r, u, http.StatusFound)
+}
+
+// devLogin signs in the configured dev user directly, issuing a normal session
+// cookie. It is only reachable while OIDC is unconfigured (see handleOIDCLogin),
+// so it can never leak into a deployed setup that has real SSO enabled.
+func (a *App) devLogin(w http.ResponseWriter, r *http.Request) {
+	email := strings.ToLower(strings.TrimSpace(a.cfg.DevEmail))
+	if a.adminEmails[email] {
+		token, err := a.issueToken(email, RoleAdmin, "")
+		if err != nil {
+			a.renderAuthError(w, "Could not start a session.")
+			return
+		}
+		a.setSessionCookie(w, token)
+		http.Redirect(w, r, a.cfg.PublicURL+"/", http.StatusFound)
+		return
+	}
+	s, err := a.StudentByEmail(r.Context(), email)
+	if err != nil || s == nil {
+		a.renderAuthError(w, "Dev login: "+email+" is not enrolled. Run: r-chat-helper admin add-student -email "+email+" -id ID -name NAME")
+		return
+	}
+	if !s.Active {
+		a.renderAuthError(w, "Account disabled.")
+		return
+	}
+	token, err := a.issueToken(email, RoleStudent, s.ID)
+	if err != nil {
+		a.renderAuthError(w, "Could not start a session.")
+		return
+	}
+	a.setSessionCookie(w, token)
+	http.Redirect(w, r, a.cfg.PublicURL+"/", http.StatusFound)
 }
 
 func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {

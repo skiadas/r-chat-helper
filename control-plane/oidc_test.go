@@ -241,3 +241,74 @@ func TestOIDCCallbackAdminRole(t *testing.T) {
 		t.Fatalf("claims = %+v, want admin professor", claims)
 	}
 }
+
+// devLogin helpers: build an app with OIDC unconfigured and RC_DEV_EMAIL set.
+func newDevLoginApp(t *testing.T, devEmail string) *App {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.DBPath = t.TempDir() + "/test.db"
+	cfg.OIDCClientSecret = ""
+	cfg.DevEmail = devEmail
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Close() })
+	return app
+}
+
+func TestDevLoginSignsInEnrolledStudent(t *testing.T) {
+	app := newDevLoginApp(t, "alice@college.edu")
+	if err := app.AddStudent(t.Context(), "alice", "alice@college.edu", "Alice", 0); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	app.handleOIDCLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("login status = %d body %s", rec.Code, rec.Body.String())
+	}
+	var sessionSet bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			sessionSet = true
+		}
+	}
+	if !sessionSet {
+		t.Fatal("dev login did not set a session cookie")
+	}
+}
+
+func TestDevLoginRequiresEnrollment(t *testing.T) {
+	app := newDevLoginApp(t, "nobody@college.edu")
+	rec := httptest.NewRecorder()
+	app.handleOIDCLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for unenrolled dev email", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "not enrolled") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestDevLoginDisabledWhenOIDCConfigured(t *testing.T) {
+	app := newDevLoginApp(t, "alice@college.edu")
+	app.cfg.OIDCClientSecret = "secret" // simulate a real SSO setup
+	if err := app.AddStudent(t.Context(), "alice", "alice@college.edu", "Alice", 0); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	app.handleOIDCLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+
+	// OIDC is half-configured (secret set, no redirect URI): login must fail
+	// closed rather than fall back to dev login.
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (no dev bypass with OIDC configured)", rec.Code)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			t.Fatal("dev login must not fire when OIDC is configured")
+		}
+	}
+}
