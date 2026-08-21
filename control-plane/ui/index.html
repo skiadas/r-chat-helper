@@ -39,7 +39,16 @@
   #compose { display:flex; gap:8px; padding:14px 18px; border-top:1px solid var(--border); background:var(--panel); }
   #compose textarea { flex:1; resize:none; min-height:44px; }
   #notice { color:var(--muted); text-align:center; padding:18px; }
+  #restore { display:none; color:var(--muted); font-size:13px; text-align:center; padding:8px 18px; background:var(--panel); border-bottom:1px solid var(--border); }
   .error { color:#ff6b6b; }
+  .session { display:flex; align-items:center; gap:6px; }
+  .session .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .session .menu-btn { background:none; border:none; color:var(--muted); font-size:15px; padding:2px 6px; cursor:pointer; }
+  .session .menu-btn:hover { color:var(--text); }
+  .menu-pop { position:absolute; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:4px; box-shadow:0 4px 16px rgba(0,0,0,.35); z-index:20; }
+  .menu-pop button { display:block; background:none; border:none; color:var(--text); font-size:13px; padding:6px 12px; border-radius:6px; text-align:left; width:100%; cursor:pointer; }
+  .menu-pop button:hover { background:#1d212b; }
+  .menu-pop button.danger { color:#ff6b6b; }
 </style>
 </head>
 <body>
@@ -57,6 +66,7 @@
       <span class="meta" id="meMeta"></span>
       <button class="secondary" id="logout">Log out</button>
     </header>
+    <div id="restore"></div>
     <div id="body">
       <div id="sidebar">
         <div class="actions">
@@ -93,6 +103,11 @@ function esc(s) {
   const d = document.createElement("div"); d.textContent = s; return d.innerHTML;
 }
 
+function closeMenus() {
+  document.querySelectorAll(".menu-pop").forEach(m => m.remove());
+}
+document.addEventListener("click", closeMenus);
+
 function showMain(s) {
   $("#login").classList.remove("active");
   $("#main").classList.add("active");
@@ -105,25 +120,84 @@ async function refreshMe() {
     (me.budget_usd > 0 ? " of " + fmtUsd(me.budget_usd) : "");
 }
 
+async function renameSession(id) {
+  const el = document.querySelector(`[data-sid="${id}"] .t`);
+  const old = el.textContent;
+  const input = document.createElement("input");
+  input.value = old; input.style.flex = "1"; input.style.minWidth = "0";
+  el.replaceWith(input);
+  input.focus(); input.select();
+  const commit = async (cancel) => {
+    const title = input.value.trim();
+    if (!cancel && title && title !== old) {
+      await api.req(`/api/me/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ title }) });
+      loadSessions();
+    } else {
+      input.replaceWith(el);
+    }
+  };
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") commit(false);
+    else if (e.key === "Escape") commit(true);
+  });
+  input.addEventListener("blur", () => commit(false));
+}
+
+async function deleteSession(id) {
+  if (!confirm("Hide this conversation? It will no longer appear in your list.")) return;
+  await api.req(`/api/me/sessions/${id}`, { method: "DELETE" });
+  loadSessions();
+  if (currentSession === id) {
+    currentSession = null;
+    $("#messages").innerHTML = `<div id="notice">Select a conversation, or start a new one.</div>`;
+  }
+}
+
+function sessionMenuBtn(id, ev) {
+  ev.stopPropagation();
+  closeMenus();
+  const rect = ev.currentTarget.getBoundingClientRect();
+  const pop = document.createElement("div");
+  pop.className = "menu-pop";
+  pop.style.left = rect.left + "px";
+  pop.style.top = (rect.bottom + 4) + "px";
+  const ren = document.createElement("button"); ren.textContent = "Rename"; ren.onclick = () => { closeMenus(); renameSession(id); };
+  const del = document.createElement("button"); del.textContent = "Delete"; del.className = "danger"; del.onclick = () => { closeMenus(); deleteSession(id); };
+  pop.append(ren, del);
+  document.body.appendChild(pop);
+}
+
 async function loadSessions() {
   const list = await api.req("/api/me/sessions");
   $("#sessions").innerHTML = "";
   for (const s of list) {
     const el = document.createElement("div");
     el.className = "session";
+    el.dataset.sid = s.id;
     el.innerHTML = `<div class="t">${esc(s.title || "(untitled)")}</div>
-      <div class="m">${fmtUsd(s.cost_usd)}</div>`;
+      <div class="m">${fmtUsd(s.cost_usd)}</div>
+      <button class="menu-btn" title="More">⋯</button>`;
     el.onclick = () => openSession(s.id);
+    el.querySelector(".menu-btn").onclick = (ev) => sessionMenuBtn(s.id, ev);
     $("#sessions").appendChild(el);
   }
+  closeMenus();
   return list;
+}
+
+async function ensureSession() {
+  if (currentSession) return currentSession;
+  const r = await api.req("/api/me/sessions", { method: "POST", body: JSON.stringify({}) });
+  currentSession = r.id;
+  return currentSession;
 }
 
 async function openSession(id) {
   currentSession = id;
+  $("#restore").style.display = "none";
   const msgs = await api.req(`/api/me/sessions/${id}/messages`);
   $("#messages").innerHTML = "";
-  if (!msgs.length) $("#messages").innerHTML = `<div id="notice">New conversation — ask away.</div>`;
+  if (!msgs.length) $("#messages").innerHTML = `<div id="notice">This is the start of a conversation.</div>`;
   for (const m of msgs) {
     const el = document.createElement("div");
     el.className = "msg " + m.role;
@@ -135,8 +209,9 @@ async function openSession(id) {
 
 async function send() {
   const text = $("#prompt").value.trim();
-  if (!text || !currentSession) return;
+  if (!text) return;
   $("#prompt").value = "";
+  const sid = await ensureSession();
   const el = document.createElement("div");
   el.className = "msg user";
   el.innerHTML = `<div class="role">you</div><div class="bubble">${esc(text)}</div>`;
@@ -148,12 +223,13 @@ async function send() {
   $("#messages").scrollTop = $("#messages").scrollHeight;
 
   try {
-    const r = await api.req(`/api/me/sessions/${currentSession}/messages`, {
+    const r = await api.req(`/api/me/sessions/${sid}/messages`, {
       method: "POST", body: JSON.stringify({ text })
     });
     thinking.innerHTML = `<div class="role">assistant</div><div class="bubble">${esc(r.assistant)}</div>
       <div class="cost">this turn: ${fmtUsd(r.cost_usd)} · total: ${fmtUsd(r.spent_usd)}</div>`;
-    refreshMe(); loadSessions();
+    refreshMe();
+    loadSessions();
   } catch (e) {
     thinking.innerHTML = `<div class="role">assistant</div><div class="bubble error">${esc(e.message)}</div>`;
   }
@@ -182,7 +258,15 @@ $("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shif
       return;
     }
     showMain({ name: me.name, spent_usd: me.spent_usd });
-    refreshMe(); loadSessions();
+    refreshMe();
+    loadSessions();
+    const cur = await api.req("/api/me/sessions/current");
+    await openSession(cur.id);
+    if (cur.restored) {
+      const banner = $("#restore");
+      banner.textContent = "Restored your last session. Click “New conversation” to start a new topic.";
+      banner.style.display = "block";
+    }
   } catch (e) {
     $("#login").classList.add("active");
   }
