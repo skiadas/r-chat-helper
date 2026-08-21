@@ -64,8 +64,8 @@ func TestSyncRatesDerivesListPrices(t *testing.T) {
 func TestUsageMultiplier(t *testing.T) {
 	cases := map[string]float64{
 		"DeepSeek V4 Flash (2x usage)": 2,
-		"GLM 5.2":                       1,
-		"foo (3.5x usage)":              3.5,
+		"GLM 5.2":                      1,
+		"foo (3.5x usage)":             3.5,
 	}
 	for name, want := range cases {
 		if got := usageMultiplier(name); got != want {
