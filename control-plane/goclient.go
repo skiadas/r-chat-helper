@@ -222,6 +222,46 @@ func (c *goClient) send(ctx context.Context, msgs []Message) (*turn, error) {
 	return &turn{Text: "Stopped: too many tool calls.", Tools: tools, Usage: total}, nil
 }
 
+// titleFor asks the model for a short conversation title from the given
+// messages. It uses a tiny max_tokens cap and no tools so it stays cheap; the
+// returned usage is priced like any other interaction. On failure it returns
+// an empty title (the session simply stays unnamed).
+func (c *goClient) titleFor(ctx context.Context, msgs []Message) (*turn, error) {
+	maxTokens := 32
+	reqMsgs := make([]chatMessage, 0, len(msgs)+2)
+	reqMsgs = append(reqMsgs, chatMessage{Role: "system", Content: "You suggest concise titles for R tutoring conversations."})
+	for _, m := range msgs {
+		reqMsgs = append(reqMsgs, chatMessage{Role: m.Role, Content: truncate([]byte(m.Text), 500)})
+	}
+	reqMsgs = append(reqMsgs, chatMessage{Role: "user", Content: "Give this conversation a short title under 50 characters that captures its topic. Reply with only the title."})
+	resp, err := c.post(ctx, chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
+	if err != nil {
+		return nil, err
+	}
+	choice := firstChoice(resp)
+	text := ""
+	if choice != nil && choice.Message.Content != nil {
+		text = strings.TrimSpace(*choice.Message.Content)
+	}
+	return &turn{Text: text, Usage: usageFromResp(resp)}, nil
+}
+
+// post marshals a request body, hits /chat/completions with the class key, and
+// returns the parsed response.
+func (c *goClient) post(ctx context.Context, body chatReq) (*chatResp, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", strings.NewReader(string(b)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.key)
+	return c.doOnce(ctx, req)
+}
+
 func (c *goClient) buildRequest(ctx context.Context, msgs []Message, tools []toolResult) (*http.Request, error) {
 	body := chatReq{
 		Model:    c.model,

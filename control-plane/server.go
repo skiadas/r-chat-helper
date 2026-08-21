@@ -23,8 +23,11 @@ func (a *App) Run(ctx context.Context) error {
 	mux.Handle("GET /api/me", a.authenticate(http.HandlerFunc(a.handleMe)))
 	mux.Handle("GET /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleListSessions)))
 	mux.Handle("POST /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleCreateSession)))
+	mux.Handle("GET /api/me/sessions/current", a.authenticate(http.HandlerFunc(a.handleCurrentSession)))
 	mux.Handle("GET /api/me/sessions/{id}/messages", a.authenticate(http.HandlerFunc(a.handleMessages)))
 	mux.Handle("POST /api/me/sessions/{id}/messages", a.authenticate(http.HandlerFunc(a.handleSend)))
+	mux.Handle("PATCH /api/me/sessions/{id}", a.authenticate(http.HandlerFunc(a.handleRenameSession)))
+	mux.Handle("DELETE /api/me/sessions/{id}", a.authenticate(http.HandlerFunc(a.handleDeleteSession)))
 
 	mux.Handle("/", uiHandler())
 
@@ -135,6 +138,36 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleCurrentSession restores the student's most recently active session
+// (draft or committed), creating a fresh draft on their very first visit.
+// The response's "restored" flag lets the UI show a restore notice.
+func (a *App) handleCurrentSession(w http.ResponseWriter, r *http.Request) {
+	s := studentOf(r)
+	if s == nil {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	ses, err := a.LatestSession(r.Context(), s.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load session")
+		return
+	}
+	restored := ses != nil
+	if ses == nil {
+		ses, err = a.CreateSession(r.Context(), s.ID, "")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to create session")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":        ses.ID,
+		"title":     ses.Title,
+		"committed": ses.Committed,
+		"restored":  restored,
+	})
+}
+
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s := studentOf(r)
 	if s == nil {
@@ -151,6 +184,52 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": ses.ID, "title": ses.Title})
+}
+
+// handleRenameSession renames a session owned by the student.
+func (a *App) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	s := studentOf(r)
+	if s == nil {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	sid := r.PathValue("id")
+	if !a.sessionOwned(r.Context(), sid, s.ID) {
+		writeErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := readJSON(r, &req); err != nil || req.Title == "" {
+		writeErr(w, http.StatusBadRequest, "title required")
+		return
+	}
+	if err := a.RenameSession(r.Context(), sid, req.Title); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to rename session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": sid})
+}
+
+// handleDeleteSession soft-deletes a session: it leaves the student's sidebar
+// and rejects further messages, but the row stays for admin review.
+func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	s := studentOf(r)
+	if s == nil {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	sid := r.PathValue("id")
+	if !a.sessionOwned(r.Context(), sid, s.ID) {
+		writeErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err := a.DeleteSession(r.Context(), sid); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to delete session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": sid})
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -241,12 +320,55 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A session becomes a real (sidebar-visible) session once it has two
+	// assistant turns of substance: commit it and ask the model for a title.
+	committed := false
+	n, err := a.CountMessages(r.Context(), sid, "assistant")
+	if err == nil && n == 2 {
+		if ses, _ := a.Session(r.Context(), sid); ses != nil && !ses.Committed {
+			if err := a.CommitSession(r.Context(), sid); err == nil {
+				committed = true
+				go a.titleSession(s.ID, sid)
+			}
+		}
+	}
+
 	spentAfter, _ := a.SpendByStudent(r.Context(), s.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"assistant": assistant,
 		"cost_usd":  float64(spentAfter-spentBefore) / 1e6,
 		"spent_usd": float64(spentAfter) / 1e6,
+		"committed": committed,
 	})
+}
+
+// titleSession asks the model for a short title for a freshly committed
+// session and persists it. The call is budgeted like any student interaction;
+// a failure leaves the session untitled (the user can rename it).
+func (a *App) titleSession(studentID, sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	msgs, err := a.Messages(ctx, sessionID)
+	if err != nil {
+		log.Printf("title: failed to load messages for %s: %v", sessionID, err)
+		return
+	}
+	resp, err := a.client.titleFor(ctx, msgs)
+	if err != nil {
+		log.Printf("title: generation failed for %s: %v", sessionID, err)
+		return
+	}
+	if resp.Text == "" {
+		return
+	}
+	if err := a.RenameSession(ctx, sessionID, resp.Text); err != nil {
+		log.Printf("title: failed to persist title for %s: %v", sessionID, err)
+		return
+	}
+	if _, err := a.RecordInteraction(ctx, studentID, sessionID, a.cfg.LocksModel,
+		Tokens{Input: resp.Usage.Input, Output: resp.Usage.Output, CacheRead: resp.Usage.CacheRead}); err != nil {
+		log.Printf("title: failed to record usage for %s/%s: %v", studentID, sessionID, err)
+	}
 }
 
 // --- helpers ---
