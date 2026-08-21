@@ -53,7 +53,7 @@ invokes, with hard timeouts/limits. The tool loop orchestration written for
 ## Conventions
 
 - Go. Keep dependencies minimal (coreos/go-oidc, golang-jwt, modernc.org/sqlite,
-  x/oauth2).
+  x/oauth2, joho/godotenv).
 - No code comments unless they explain non-obvious decisions; prefer clear code
   and this documentation.
 - Commit in small, reviewable increments; never commit keys, student data, or

@@ -9,9 +9,11 @@ import (
 	"syscall"
 
 	cp "github.com/haris/r-chat-helper/control-plane"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	_ = godotenv.Load() // dev convenience; shell env wins, absence is fine
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)

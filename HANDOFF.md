@@ -86,6 +86,8 @@ Fresh Go module, all ported/buildable, 15 unit tests passing, `go vet` clean.
 **Config** — `control-plane/config.go`; env prefix `RC_`
 (e.g. `RC_PROVIDER_KEY`, `RC_UPSTREAM`, `RC_MODEL`, `RC_OIDC_ISSUER`,
 `RC_JWT_SECRET`, `RC_WEBFETCH_ALLOW`). Defaults point at the real upstream.
+In dev, `control-plane/.env` is auto-loaded at startup (godotenv); env values
+set in the shell win over it.
 
 ## 4. Verified vs. unverified
 
@@ -190,6 +192,7 @@ control-plane/             Go module (module github.com/haris/r-chat-helper/cont
 
 ```sh
 cd control-plane && go test ./... && go build ./...
+cp .env.example .env    # fill in RC_PROVIDER_KEY; auto-loaded at startup
 go run ./cmd/r-chat-helper serve
-go run ./cmd/r-chat-helper admin add-student -email E -id ID -name NAME -key sk-...
+go run ./cmd/r-chat-helper admin add-student -email E -id ID -name NAME
 ```
