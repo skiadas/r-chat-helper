@@ -1,0 +1,9 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
