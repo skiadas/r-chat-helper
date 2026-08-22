@@ -3,8 +3,14 @@
 # Build stage: compile the control-plane binary (also embeds the chat UI).
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY control-plane/ /src/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/r-chat-helper ./cmd/r-chat-helper
+COPY control-plane/go.mod control-plane/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+COPY control-plane/ ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/r-chat-helper ./cmd/r-chat-helper
 
 # Runtime stage: minimal image with CA certs (webfetch + OIDC need TLS).
 FROM alpine:3.20
