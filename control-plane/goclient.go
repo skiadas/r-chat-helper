@@ -104,6 +104,9 @@ type toolCallFn struct {
 }
 
 type chatResp struct {
+	// reasoning_content from the upstream is intentionally not parsed: it is
+	// the model's chain-of-thought, which students should not see, and its
+	// tokens are billed as output tokens, so the cost engine accounts for it.
 	ID      string `json:"id"`
 	Choices []struct {
 		Message struct {

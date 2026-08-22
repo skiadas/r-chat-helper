@@ -77,6 +77,28 @@ func (a *App) initialSync() {
 
 // --- handlers ---
 
+// requireStudent returns the authenticated student or writes a 401 and
+// reports failure. Handlers use it to shed the repeated nil-guard boilerplate.
+func (a *App) requireStudent(w http.ResponseWriter, r *http.Request) (*Student, bool) {
+	s := studentOf(r)
+	if s == nil {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return nil, false
+	}
+	return s, true
+}
+
+// requireOwnedSession extracts the {id} path value and verifies it names a
+// non-deleted session owned by the student, writing 404 otherwise.
+func (a *App) requireOwnedSession(w http.ResponseWriter, r *http.Request, s *Student) (string, bool) {
+	sid := r.PathValue("id")
+	if !a.sessionOwned(r.Context(), sid, s.ID) {
+		writeErr(w, http.StatusNotFound, "session not found")
+		return "", false
+	}
+	return sid, true
+}
+
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	c := claimsOf(r)
 	if c == nil {
@@ -90,9 +112,8 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
 	spent, err := a.SpendByStudent(r.Context(), s.ID)
@@ -112,9 +133,8 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
 	sessions, err := a.ListSessions(r.Context(), s.ID)
@@ -143,9 +163,8 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // (draft or committed), creating a fresh draft on their very first visit.
 // The response's "restored" flag lets the UI show a restore notice.
 func (a *App) handleCurrentSession(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
 	ses, err := a.LatestSession(r.Context(), s.ID)
@@ -170,9 +189,8 @@ func (a *App) handleCurrentSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -189,14 +207,12 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 // handleRenameSession renames a session owned by the student.
 func (a *App) handleRenameSession(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
-	sid := r.PathValue("id")
-	if !a.sessionOwned(r.Context(), sid, s.ID) {
-		writeErr(w, http.StatusNotFound, "session not found")
+	sid, ok := a.requireOwnedSession(w, r, s)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -216,14 +232,12 @@ func (a *App) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSession soft-deletes a session: it leaves the student's sidebar
 // and rejects further messages, but the row stays for admin review.
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
-	sid := r.PathValue("id")
-	if !a.sessionOwned(r.Context(), sid, s.ID) {
-		writeErr(w, http.StatusNotFound, "session not found")
+	sid, ok := a.requireOwnedSession(w, r, s)
+	if !ok {
 		return
 	}
 	if err := a.DeleteSession(r.Context(), sid); err != nil {
@@ -234,14 +248,12 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
-	sid := r.PathValue("id")
-	if !a.sessionOwned(r.Context(), sid, s.ID) {
-		writeErr(w, http.StatusNotFound, "session not found")
+	sid, ok := a.requireOwnedSession(w, r, s)
+	if !ok {
 		return
 	}
 	msgs, err := a.Messages(r.Context(), sid)
@@ -251,28 +263,18 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		if m.Role != "assistant" {
-			out = append(out, map[string]any{"role": m.Role, "text": m.Text})
-			continue
-		}
-		html, err := renderMarkdown(m.Text)
-		if err != nil {
-			html = ""
-		}
-		out = append(out, map[string]any{"role": m.Role, "text": m.Text, "html": html})
+		out = append(out, messagePayload(m))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
-	s := studentOf(r)
-	if s == nil {
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+	s, ok := a.requireStudent(w, r)
+	if !ok {
 		return
 	}
-	sid := r.PathValue("id")
-	if !a.sessionOwned(r.Context(), sid, s.ID) {
-		writeErr(w, http.StatusNotFound, "session not found")
+	sid, ok := a.requireOwnedSession(w, r, s)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -316,27 +318,9 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		log.Printf("cost: failed to record usage for %s/%s: %v", s.ID, sid, err)
 	}
 
-	// Persist the assistant turn. The student's chat shows the model's answer
-	// plus a compact source line; the model-facing context inlines the fetched
-	// tool output so later turns still have the documentation available.
-	assistant := resp.Text
-	if len(resp.Tools) > 0 {
-		refs := make([]string, 0, len(resp.Tools))
-		for _, t := range resp.Tools {
-			refs = append(refs, t.InputText)
-		}
-		assistant += "\n\n(fetched: " + strings.Join(refs, ", ") + ")"
-	}
-	context := resp.Text
-	for _, t := range resp.Tools {
-		context += "\n\n[fetched " + t.InputText + "]\n" + truncate([]byte(t.Output), 8000)
-	}
-	if assistant == "" {
-		assistant = "(no text response)"
-	}
-	if context == "" {
-		context = assistant
-	}
+	// Persist the assistant turn: what the student sees plus a model-facing
+	// context that keeps fetched tool output available for later turns.
+	assistant, context := assistantTextContext(resp)
 	if err := a.AddMessage(r.Context(), sid, "assistant", assistant, context); err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save response")
 		return
@@ -357,6 +341,44 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- helpers ---
+
+// messagePayload shapes a message for the chat API: user turns carry plain
+// text, assistant turns also carry pre-rendered markdown HTML.
+func messagePayload(m Message) map[string]any {
+	if m.Role != "assistant" {
+		return map[string]any{"role": m.Role, "text": m.Text}
+	}
+	html, err := renderMarkdown(m.Text)
+	if err != nil {
+		html = ""
+	}
+	return map[string]any{"role": m.Role, "text": m.Text, "html": html}
+}
+
+// assistantTextContext splits a model turn into what the student's chat shows
+// (the answer plus a compact fetched-source line) and what later model turns
+// see (the answer with fetched tool output inlined).
+func assistantTextContext(resp *turn) (assistant, context string) {
+	assistant = resp.Text
+	if len(resp.Tools) > 0 {
+		refs := make([]string, 0, len(resp.Tools))
+		for _, t := range resp.Tools {
+			refs = append(refs, t.InputText)
+		}
+		assistant += "\n\n(fetched: " + strings.Join(refs, ", ") + ")"
+	}
+	context = resp.Text
+	for _, t := range resp.Tools {
+		context += "\n\n[fetched " + t.InputText + "]\n" + truncate([]byte(t.Output), 8000)
+	}
+	if assistant == "" {
+		assistant = "(no text response)"
+	}
+	if context == "" {
+		context = assistant
+	}
+	return assistant, context
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
