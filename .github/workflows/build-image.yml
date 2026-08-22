@@ -15,6 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: control-plane/go.mod
+          cache: true
+
+      - name: Build binary
+        run: |
+          cd control-plane
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/r-chat-helper ./cmd/r-chat-helper
+
       - uses: docker/metadata-action@v6
         id: meta
         with:
@@ -37,5 +47,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

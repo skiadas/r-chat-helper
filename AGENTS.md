@@ -37,6 +37,12 @@ README; for invariants, read below.
 
 - Go. Keep dependencies minimal: prefer the standard library for small tasks;
   use small, well-maintained libraries when warranted.
+- **Never start, stop, or restart Docker/OrbStack (or any other local
+  service) on the dev machine.** Other services depend on it running. If you
+  need Docker and it is not running, ask the user to start it.
+- Never build/run Docker locally to verify workflow or Dockerfile changes;
+  CI is the source of truth for those. Local verification is `go build` /
+  `go test` only.
 - No code comments unless they explain non-obvious decisions; prefer clear code
   and this documentation.
 - Commit in small, reviewable increments; never commit keys, student data, or

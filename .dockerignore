@@ -1,10 +1,5 @@
-.git
-control-plane/.env
-control-plane/*.db
-control-plane/*.db-wal
-control-plane/*.db-shm
-.randomfile.txt
-randomfile.txt
-HANDOFF.md
-AGENTS.md
-.SESSION-NOTES.md
+*
+!control-plane
+!control-plane/dist
+!control-plane/dist/r-chat-helper
+!Dockerfile

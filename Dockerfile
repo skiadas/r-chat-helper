@@ -1,24 +1,13 @@
 # syntax=docker/dockerfile:1
 
-# Build stage: compile the control-plane binary (also embeds the chat UI).
-FROM golang:1.25-alpine AS build
-WORKDIR /src
-COPY control-plane/go.mod control-plane/go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    go mod download
-COPY control-plane/ ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/r-chat-helper ./cmd/r-chat-helper
-
-# Runtime stage: minimal image with CA certs (webfetch + OIDC need TLS).
+# The binary is built on the GitHub Actions runner (see build-image.yml), then
+# copied into this minimal runtime image. Nothing compiles here or on the server.
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S -G app app
 RUN mkdir -p /data && chown -R app:app /data
 USER app
 WORKDIR /app
-COPY --from=build /out/r-chat-helper /app/r-chat-helper
+COPY control-plane/dist/r-chat-helper /app/r-chat-helper
 ENV RC_DB=/data/r-chat-helper.db
 VOLUME /data
 EXPOSE 8080
