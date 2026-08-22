@@ -9,6 +9,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/r-chat-helper ./cm
 # Runtime stage: minimal image with CA certs (webfetch + OIDC need TLS).
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S -G app app
+RUN mkdir -p /data && chown -R app:app /data
 USER app
 WORKDIR /app
 COPY --from=build /out/r-chat-helper /app/r-chat-helper
