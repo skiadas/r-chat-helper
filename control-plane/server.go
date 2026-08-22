@@ -342,18 +342,8 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A session becomes a real (sidebar-visible) session once it has two
-	// assistant turns of substance: commit it and ask the model for a title.
-	committed := false
-	n, err := a.CountMessages(r.Context(), sid, "assistant")
-	if err == nil && n == 2 {
-		if ses, _ := a.Session(r.Context(), sid); ses != nil && !ses.Committed {
-			if err := a.CommitSession(r.Context(), sid); err == nil {
-				committed = true
-				go a.titleSession(s.ID, sid)
-			}
-		}
-	}
+	// A session commits once it holds two assistant turns (see advanceSession).
+	committed := a.advanceSession(r.Context(), s.ID, sid)
 
 	spentAfter, _ := a.SpendByStudent(r.Context(), s.ID)
 	html, _ := renderMarkdown(assistant)
@@ -364,35 +354,6 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		"spent_usd": float64(spentAfter) / 1e6,
 		"committed": committed,
 	})
-}
-
-// titleSession asks the model for a short title for a freshly committed
-// session and persists it. The call is budgeted like any student interaction;
-// a failure leaves the session untitled (the user can rename it).
-func (a *App) titleSession(studentID, sessionID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	msgs, err := a.Messages(ctx, sessionID)
-	if err != nil {
-		log.Printf("title: failed to load messages for %s: %v", sessionID, err)
-		return
-	}
-	resp, err := a.client.titleFor(ctx, msgs)
-	if err != nil {
-		log.Printf("title: generation failed for %s: %v", sessionID, err)
-		return
-	}
-	if resp.Text == "" {
-		return
-	}
-	if err := a.RenameSession(ctx, sessionID, resp.Text); err != nil {
-		log.Printf("title: failed to persist title for %s: %v", sessionID, err)
-		return
-	}
-	if _, err := a.RecordInteraction(ctx, studentID, sessionID, a.cfg.LocksModel,
-		Tokens{Input: resp.Usage.Input, Output: resp.Usage.Output, CacheRead: resp.Usage.CacheRead}); err != nil {
-		log.Printf("title: failed to record usage for %s/%s: %v", studentID, sessionID, err)
-	}
 }
 
 // --- helpers ---
