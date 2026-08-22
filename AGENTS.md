@@ -40,15 +40,39 @@ provider names or API keys.
   and the embedded chat UI. Admin CLI.
 - `control-plane/ui/` — minimal embedded chat UI (sign-in → conversation list →
   chat), served by the control plane.
+- `control-plane/session_lifecycle.go` — the conversation lifecycle policy
+  (draft → commit → background title), kept out of the handlers.
+
+### Session lifecycle (behavioral contract — do not casually change)
+
+A session starts as a **draft** when created. It commits — becoming visible in
+the sidebar — once it holds **two assistant turns**, at which point a
+background, budgeted model call tries to title it (a failure leaves it
+untitled; students can rename). The commit policy lives in
+`advanceSession` in `session_lifecycle.go`. On login the student is restored to
+their most recent session, draft or committed (`GET /api/me/sessions/current`).
+Soft-delete (`deleted_at`) hides a session and rejects further sends while
+keeping the row and messages for admins. Only committed, non-deleted sessions
+are listed in the sidebar.
 
 Data flow per student message: control plane loads the conversation, calls
 `<upstream>/chat/completions` with the shared class key and the locked model,
 runs the (bounded) tool loop for `webfetch` calls the model makes, persists the
 assistant turn, and records frozen usage.
 
+Upstream contract facts that matter when touching `goclient.go` / cost code:
+- The upstream reports usage **per interaction**, so costs are priced directly
+  (`RecordInteraction`), not by diffing stored snapshots.
+- `deepseek-v4-flash` returns `reasoning_content` (chain-of-thought) which the
+  client deliberately drops; those tokens are billed as output tokens.
+- The Go rail requires the account's "contact servers in China" permission
+  enabled in the opencode console.
+
 `run_r` (future): one shared R runner container executing scripts the model
 invokes, with hard timeouts/limits. The tool loop orchestration written for
-`webfetch` will be reused.
+`webfetch` will be reused. It should start with read-only introspection tools
+(`sessionInfo`, package/export/data listing) so answers can be grounded in the
+actual course environment before graduating to code execution.
 
 ## Conventions
 
@@ -74,32 +98,41 @@ go run ./cmd/r-chat-helper admin list
 go run ./cmd/r-chat-helper admin sync-rates
 ```
 
+## Deploy
+
+Single small VM (Lightsail-class). Image is built in CI and published to
+`ghcr.io/skiadas/r-chat-helper` (tagged `<sha>` + `latest` on push to `main`);
+the server pulls via `scripts/deploy.sh` on a cron and restarts only on digest
+change. `compose.yml` runs the app with SQLite on a `data` volume, and Caddy
+behind the `proxy` profile terminates TLS for `rchat-helper.harisskiadas.com`.
+The OIDC client must be registered on the SSO with the exact redirect URI
+`https://rchat-helper.harisskiadas.com/auth/callback`. Dev login (`RC_DEV_EMAIL`)
+is only active while no OIDC client secret is set.
+
 ## Status
 
-Phase 1 (this repo's start) — the port is done:
+Port (from `sdp-helper`) complete, plus substantial new surface; 25 Go tests,
+`go vet` clean.
 
-- Ported from `sdp-helper`: OIDC auth w/ one-time codes + JWT cookies; the
-  cost/budget engine (token-diff pricing from the daily models.dev rate sync,
-  per-student soft caps); the student/session/usage storage; the admin CLI; and
-  the embedded chat UI.
-- Built new: a stateless Go client to the upstream chat endpoint that injects
-  the configured class key and forces the locked model, with a bounded
-  multi-turn tool loop supporting the `webfetch` tool (timeout + body cap +
-  optional host allowlist). Sessions and chat messages are now stored in SQLite
-  by the control plane (no external agent runtime).
-- Unit-tested: auth (cookie/disabled), OIDC flow against a fake provider,
-  cost/rates, and the new client/webfetch loop (key injection, model lock,
-  tool loop, allowlist).
+Verified live (dev mode, real key): the full `handleSend` path — compiled app +
+real `RC_PROVIDER_KEY` + SQLite — with multi-turn exchanges, webfetch HTML→text
+conversion, usage/cost recording, and the session lifecycle end-to-end (draft →
+commit on second assistant turn, background titled, rename, soft-delete).
+Rendered markdown and prompt-side conciseness + course-environment anchoring
+spot-checked live.
+
+Unit-tested: auth (cookie/disabled), OIDC flow against a fake provider,
+cost/rates, the client/webfetch loop (key injection, model lock, tool loop,
+allowlist, HTML-to-text), session lifecycle store semantics, markdown escaping,
+and dev-login bypass.
 
 Remaining:
 
-- Deploy wiring (compose + Caddy + GHCR) for this single-VM app.
-- App-level real-key e2e: the upstream contract (path, Bearer auth, `tool_calls`
-  shape, usage fields) was verified live via curl on both `zen/v1` and
-  `zen/go/v1`, but the full `handleSend` path against the live upstream with a
-  real key is still exercising. Note: the Go rail requires the account's
-  "contact servers in China" permission enabled in the opencode console.
-- `run_r`: a shared R runner + the model-invoked execution tool, reusing the
-  webfetch tool-loop orchestration with a sandbox/limits.
-- Live SSO login once the client is registered; admin web UI (budget/cost
-  views).
+- **Live SSO login** — requires registering the r-chat-helper OIDC client on
+  `sso.harisskiadas.com` (exact redirect URI) and setting the secret.
+- **Ship deploy** — compose/Caddy/GHCR wiring is committed but the Lightsail VM,
+  cron, DNS, and .env provisioning are not yet run.
+- **Streaming vs non-streaming** decision — currently the chat turn is
+  non-streaming (blocking response); SSE would affect goclient + the UI.
+- **run_r** — shared R runner, starting with read-only introspection tools.
+- **Admin web UI** — budget/cost/session views (currently CLI only).
