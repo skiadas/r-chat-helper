@@ -30,6 +30,13 @@ func (a *App) Run(ctx context.Context) error {
 	mux.Handle("PATCH /api/me/sessions/{id}", a.authenticate(http.HandlerFunc(a.handleRenameSession)))
 	mux.Handle("DELETE /api/me/sessions/{id}", a.authenticate(http.HandlerFunc(a.handleDeleteSession)))
 
+	mux.Handle("GET /api/admin/students", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminListStudents))))
+	mux.Handle("POST /api/admin/students", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminCreateStudent))))
+	mux.Handle("PATCH /api/admin/students/{id}", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminUpdateStudent))))
+	mux.Handle("GET /api/admin/sessions", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminListSessions))))
+	mux.Handle("GET /api/admin/sessions/{id}/messages", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminSessionMessages))))
+	mux.Handle("GET /api/admin/scratch-login", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminScratchLogin))))
+
 	mux.Handle("/", uiHandler())
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -126,6 +133,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		"name":          s.Name,
 		"email":         s.Email,
 		"role":          RoleStudent,
+		"scratch":       c.Scratch,
 		"budget_usd":    float64(s.BudgetMicros) / 1e6,
 		"spent_usd":     float64(spent) / 1e6,
 		"remaining_usd": float64(s.BudgetMicros-spent) / 1e6,

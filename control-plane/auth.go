@@ -16,17 +16,25 @@ type claims struct {
 	Email     string `json:"email"`
 	Role      string `json:"role"`
 	StudentID string `json:"sid,omitempty"`
+	Scratch   bool   `json:"scratch,omitempty"`
 	jwt.RegisteredClaims
 }
 
 var errNoAuth = errors.New("missing or invalid credentials")
 
 func (a *App) issueToken(email, role, studentID string) (string, error) {
+	return a.issueTokenScratch(email, role, studentID, false)
+}
+
+// issueTokenScratch issues a token; the scratch flag marks an instructor's
+// test identity so the UI can surface it.
+func (a *App) issueTokenScratch(email, role, studentID string, scratch bool) (string, error) {
 	now := time.Now()
 	c := claims{
 		Email:     email,
 		Role:      role,
 		StudentID: studentID,
+		Scratch:   scratch,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   email,
 			IssuedAt:  jwt.NewNumericDate(now),

@@ -140,6 +140,103 @@ func (a *App) SetActive(ctx context.Context, email string, active bool) error {
 	return err
 }
 
+// StudentWithSpend is a student joined with their total frozen cost.
+type StudentWithSpend struct {
+	Student
+	SpentMicros int64
+}
+
+// ListStudentsWithSpend returns all students (except scratch identities) with
+// their total spend, for the admin surface.
+func (a *App) ListStudentsWithSpend(ctx context.Context) ([]StudentWithSpend, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT st.id, st.email, st.name, st.budget_micros, st.active, st.created_at,
+		       COALESCE((SELECT SUM(cost_micros) FROM usage_events u WHERE u.student_id = st.id), 0)
+		FROM students st
+		WHERE st.id NOT LIKE 'scratch:%'
+		ORDER BY st.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StudentWithSpend
+	for rows.Next() {
+		sw := StudentWithSpend{}
+		var active int
+		if err := rows.Scan(&sw.ID, &sw.Email, &sw.Name, &sw.BudgetMicros, &active, &sw.CreatedAt, &sw.SpentMicros); err != nil {
+			return nil, err
+		}
+		sw.Active = active != 0
+		out = append(out, sw)
+	}
+	return out, rows.Err()
+}
+
+// ScratchSummary returns the total spend across all scratch (instructor test)
+// identities, so the admin view can surface testing cost separately.
+func (a *App) ScratchSummary(ctx context.Context) (totalMicros int64, count int, err error) {
+	err = a.db.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT SUM(cost_micros) FROM usage_events u
+		                  JOIN students st ON st.id = u.student_id
+		                 WHERE st.id LIKE 'scratch:%'), 0),
+		       (SELECT COUNT(*) FROM students WHERE id LIKE 'scratch:%')`).Scan(&totalMicros, &count)
+	return
+}
+
+// AdminSession is a session joined with its owner, for the admin surface.
+type AdminSession struct {
+	Session
+	StudentEmail string
+	StudentName  string
+}
+
+// ListAllSessions returns every non-scratch session (drafts and soft-deleted
+// included), most recently active first, with the owner's identity.
+func (a *App) ListAllSessions(ctx context.Context) ([]AdminSession, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT s.id, s.student_id, s.title, s.committed, COALESCE(s.deleted_at,0), s.created_at, s.updated_at,
+		       st.email, st.name
+		FROM sessions s JOIN students st ON st.id = s.student_id
+		WHERE st.id NOT LIKE 'scratch:%'
+		ORDER BY s.updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AdminSession
+	for rows.Next() {
+		as := AdminSession{}
+		var committed, deleted int
+		if err := rows.Scan(&as.ID, &as.StudentID, &as.Title, &committed, &deleted, &as.CreatedAt, &as.UpdatedAt,
+			&as.StudentEmail, &as.StudentName); err != nil {
+			return nil, err
+		}
+		as.Committed = committed != 0
+		as.Deleted = deleted != 0
+		out = append(out, as)
+	}
+	return out, rows.Err()
+}
+
+// EnsureScratchStudent returns the scratch (instructor test) identity for the
+// given admin email, creating it on first use. Scratch identities appear in
+// neither student lists nor session audits, and their spend is tracked
+// separately so instructor testing never touches a student budget.
+func (a *App) EnsureScratchStudent(ctx context.Context, adminEmail string) (*Student, error) {
+	id := "scratch:" + adminEmail
+	s, err := a.StudentByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s != nil {
+		return s, nil
+	}
+	if err := a.AddStudent(ctx, id, adminEmail, "Instructor (scratch)", 0); err != nil {
+		return nil, err
+	}
+	return a.StudentByID(ctx, id)
+}
+
 // --- sessions ---
 
 func (a *App) CreateSession(ctx context.Context, studentID, title string) (*Session, error) {

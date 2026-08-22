@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R Tutor — Instructor</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="admin" class="screen active">
+    <header>
+      <span class="name" id="meName"></span>
+      <span class="meta" id="meMeta"></span>
+      <a class="signin-btn" href="/api/admin/scratch-login">Test the student experience</a>
+      <button class="secondary" id="logout">Log out</button>
+    </header>
+    <div class="layout">
+      <section id="studentsPane">
+        <form id="addStudent" class="row">
+          <input id="newEmail" type="email" placeholder="email" required>
+          <input id="newID" placeholder="id" required>
+          <input id="newName" placeholder="name" required>
+          <input id="newBudget" type="number" min="0" step="0.01" placeholder="budget $" style="width:90px">
+          <button type="submit">Add</button>
+        </form>
+        <div class="pane-head">
+          <span>Students</span>
+          <span class="grow"></span>
+          <span class="usr" id="scratchSummary"></span>
+        </div>
+        <div class="scroller">
+          <table class="data">
+            <thead><tr><th>Name</th><th>Email</th><th class="num">Budget</th><th class="num">Spent</th><th>Status</th></tr></thead>
+            <tbody id="students"></tbody>
+          </table>
+        </div>
+      </section>
+      <section id="sessionsPane">
+        <div class="pane-head">
+          <span>Sessions</span>
+          <span class="grow"></span>
+          <button class="secondary" id="refresh">Refresh</button>
+        </div>
+        <div class="scroller" id="sessionsList">
+          <div id="notice">Select a session to view its messages.</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="messagesPane" style="display:none; height:100%; flex-direction:column;">
+    <header>
+      <button class="secondary" id="backBtn">← Back</button>
+      <span class="name" id="sesTitle"></span>
+      <span class="meta" id="sesMeta"></span>
+    </header>
+    <div id="adminMsgs" style="flex:1; overflow-y:auto; padding:18px;"></div>
+  </div>
+
+<script type="module">
+import { $, api, fmtUsd, esc, fillMessages } from "/js/api.js";
+
+let currentSid = null;
+let me = null;
+
+function showMessagesPane() {
+  $("#admin").style.display = "none";
+  const p = $("#messagesPane");
+  p.style.display = "flex";
+}
+
+function showAdmin() {
+  $("#messagesPane").style.display = "none";
+  $("#admin").style.display = "block";
+}
+
+function meter(spent, budget) {
+  if (!budget) return "";
+  const frac = budget > 0 ? spent / budget : 0;
+  const cls = frac >= 1 ? "over" : frac >= 0.8 ? "warn" : "";
+  const w = Math.min(100, Math.round(frac * 100));
+  return `<div class="meter" title="${fmtUsd(spent)} of ${fmtUsd(budget)}"><i class="${cls}" style="width:${w}%"></i></div>`;
+}
+
+function statusBadge(active) {
+  return `<span class="badge ${active ? "on" : "off"}">${active ? "active" : "off"}</span>`;
+}
+
+async function loadStudents() {
+  const data = await api.req("/api/admin/students");
+  const tbody = $("#students");
+  tbody.innerHTML = "";
+  for (const s of data.students) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${esc(s.name)}</td>
+      <td class="usr">${esc(s.email)}</td>
+      <td class="num">${meter(s.spent_usd, s.budget_usd)}</td>
+      <td class="num">${fmtUsd(s.spent_usd)}</td>
+      <td><button class="secondary" data-act data-id="${esc(s.id)}">${s.active ? "Deactivate" : "Activate"}</button></td>`;
+    tr.querySelector("[data-act]").onclick = async () => {
+      await api.req(`/api/admin/students/${encodeURIComponent(s.id)}`, {
+        method: "PATCH", body: JSON.stringify({ active: !s.active })
+      });
+      loadStudents();
+    };
+    tbody.appendChild(tr);
+  }
+  $("#scratchSummary").textContent = `testing: ${fmtUsd(data.scratch_spent)} (${data.scratch_count})`;
+}
+
+async function openSession(sid) {
+  currentSid = sid;
+  const [msgs, sessions] = await Promise.all([
+    api.req(`/api/admin/sessions/${sid}/messages`),
+    (async () => {
+      const list = await api.req("/api/admin/sessions");
+      return list.find(x => x.id === sid);
+    })()
+  ]);
+  const ses = sessions || { title: "(deleted)" };
+  $("#sesTitle").textContent = `${ses.student_name} — ${ses.title || "(untitled)"}`;
+  const status = ses.deleted ? "deleted" : ses.committed ? "committed" : "draft";
+  $("#sesMeta").textContent = `${status} · ${esc(ses.student_email || "")}`;
+  fillMessages($("#adminMsgs"), msgs);
+  showMessagesPane();
+}
+
+function tagFor(s) {
+  if (s.deleted) return `<span class="tag deleted">deleted</span>`;
+  if (!s.committed) return `<span class="tag draft">draft</span>`;
+  return "";
+}
+
+async function loadSessions() {
+  const list = await api.req("/api/admin/sessions");
+  const box = $("#sessionsList");
+  box.innerHTML = "";
+  if (!list.length) {
+    box.innerHTML = `<div id="notice">No sessions yet.</div>`;
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "data";
+  table.innerHTML = `<thead><tr><th>Student</th><th>Title</th><th>News</th><th>Updated</th></tr></thead>`;
+  const tbody = document.createElement("tbody");
+  for (const s of list) {
+    const tr = document.createElement("tr");
+    tr.className = s.deleted ? "strike" : "clickable";
+    const d = new Date(s.updated * 1000);
+    tr.innerHTML = `
+      <td>${esc(s.student_name)}<div class="usr">${esc(s.student_email)}</div></td>
+      <td>${esc(s.title || "(untitled)")}</td>
+      <td>${tagFor(s)}</td>
+      <td class="usr">${d.toLocaleDateString()} ${d.toLocaleTimeString()}</td>`;
+    tr.onclick = () => openSession(s.id);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
+$("#logout").onclick = () => { location.href = "/logout"; };
+$("#backBtn").onclick = () => { showAdmin(); loadSessions(); };
+$("#refresh").onclick = loadSessions;
+
+$("#addStudent").onsubmit = async (e) => {
+  e.preventDefault();
+  await api.req("/api/admin/students", {
+    method: "POST", body: JSON.stringify({
+      email: $("#newEmail").value.trim(),
+      id: $("#newID").value.trim(),
+      name: $("#newName").value.trim(),
+      budget_usd: parseFloat($("#newBudget").value) || 0
+    })
+  });
+  e.target.reset();
+  loadStudents();
+};
+
+(async () => {
+  try {
+    me = await api.req("/api/me");
+    if (me.role !== "admin") { location.href = "/"; return; }
+    $("#meName").textContent = me.email;
+  } catch (e) {
+    location.href = "/";
+    return;
+  }
+  loadStudents();
+  loadSessions();
+  setInterval(loadSessions, 30000);
+})();
+</script>
+</body>
+</html>
