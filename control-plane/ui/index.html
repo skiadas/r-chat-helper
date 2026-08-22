@@ -156,7 +156,8 @@ async function send() {
   $("#messages").appendChild(el);
   const thinking = document.createElement("div");
   thinking.className = "msg assistant";
-  thinking.innerHTML = `<div class="role">assistant</div><div class="bubble">…</div>`;
+  thinking.innerHTML = `<div class="role">assistant</div><div class="bubble">
+    <div class="typing"><i></i><i></i><i></i></div></div>`;
   $("#messages").appendChild(thinking);
   $("#messages").scrollTop = $("#messages").scrollHeight;
 
