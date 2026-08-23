@@ -105,6 +105,31 @@ func TestAdminCreateStudent(t *testing.T) {
 	}
 }
 
+// TestAdminCreateStudentDefaultsIDToEmail covers adding a student with only
+// email+name (the admin form): the internal id falls back to the email.
+func TestAdminCreateStudentDefaultsIDToEmail(t *testing.T) {
+	app := newAdminApp(t)
+	cookie := adminToken(t, app)
+
+	body := `{"email":"carol@college.edu","name":"Carol"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/students", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminCreateStudent))).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create student = %d body %s", rec.Code, rec.Body.String())
+	}
+	s, err := app.StudentByEmail(t.Context(), "carol@college.edu")
+	if err != nil || s == nil {
+		t.Fatalf("created student not found: %v, %v", s, err)
+	}
+	if s.ID != "carol@college.edu" {
+		t.Fatalf("id = %q, want default of email", s.ID)
+	}
+}
+
 func TestAdminCreateStudentRejectsScratchPrefix(t *testing.T) {
 	app := newAdminApp(t)
 	cookie := adminToken(t, app)
@@ -172,6 +197,22 @@ func TestScratchIdentityIsolated(t *testing.T) {
 	}
 	if count != 1 || spent != 0 {
 		t.Fatalf("scratch summary = %d spend, %d count; want 0/1", spent, count)
+	}
+}
+
+// TestAdminSessionsIncludeStudentID verifies the sessions audit carries the
+// owner's internal id, which the admin filter dropdown keys on.
+func TestAdminSessionsIncludeStudentID(t *testing.T) {
+	app := newAdminApp(t)
+	if _, err := app.CreateSession(t.Context(), "alice", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := app.ListAllSessions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].StudentID != "alice" {
+		t.Fatalf("sessions = %+v, want one session owned by alice", sessions)
 	}
 }
 

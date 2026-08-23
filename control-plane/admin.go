@@ -55,9 +55,14 @@ func (a *App) handleAdminCreateStudent(w http.ResponseWriter, r *http.Request) {
 		Name      string  `json:"name"`
 		BudgetUsd float64 `json:"budget_usd"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Email == "" || req.ID == "" || req.Name == "" {
-		writeErr(w, http.StatusBadRequest, "email, id and name are required")
+	if err := readJSON(r, &req); err != nil || req.Email == "" || req.Name == "" {
+		writeErr(w, http.StatusBadRequest, "email and name are required")
 		return
+	}
+	// Students are tracked by email; the internal id defaults to it so the
+	// admin never has to invent one.
+	if req.ID == "" {
+		req.ID = req.Email
 	}
 	if strings.HasPrefix(req.ID, "scratch:") {
 		writeErr(w, http.StatusBadRequest, "reserved id prefix")
@@ -119,6 +124,7 @@ func (a *App) handleAdminListSessions(w http.ResponseWriter, r *http.Request) {
 			"deleted":       as.Deleted,
 			"created":       as.CreatedAt,
 			"updated":       as.UpdatedAt,
+			"student_id":    as.StudentID,
 			"student_email": as.StudentEmail,
 			"student_name":  as.StudentName,
 		})

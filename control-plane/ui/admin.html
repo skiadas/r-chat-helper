@@ -14,11 +14,14 @@
       <a class="signin-btn" href="/api/admin/scratch-login">Test the student experience</a>
       <button class="secondary" id="logout">Log out</button>
     </header>
+    <div class="tabbar">
+      <button id="tabStudents" class="active">Students</button>
+      <button id="tabSessions">Sessions</button>
+    </div>
     <div class="layout">
-      <section id="studentsPane">
-        <form id="addStudent" class="row">
+      <section id="studentsPane" class="pane active">
+        <form id="addStudent" class="row" autocomplete="off">
           <input id="newEmail" type="email" placeholder="email" required>
-          <input id="newID" placeholder="id" required>
           <input id="newName" placeholder="name" required>
           <input id="newBudget" type="number" min="0" step="0.01" placeholder="budget $" style="width:90px">
           <button type="submit">Add</button>
@@ -35,10 +38,12 @@
           </table>
         </div>
       </section>
-      <section id="sessionsPane">
+      <section id="sessionsPane" class="pane">
         <div class="pane-head">
-          <span>Sessions</span>
+          <button class="btn" id="drillBack" style="display:none">← Back to sessions</button>
+          <span id="sessionsTitle">Sessions</span>
           <span class="grow"></span>
+          <select id="sessionFilter"></select>
           <button class="secondary" id="refresh">Refresh</button>
         </div>
         <div class="scroller" id="sessionsList">
@@ -48,31 +53,11 @@
     </div>
   </div>
 
-  <div id="messagesPane" style="display:none; height:100%; flex-direction:column;">
-    <header>
-      <button class="secondary" id="backBtn">← Back</button>
-      <span class="name" id="sesTitle"></span>
-      <span class="meta" id="sesMeta"></span>
-    </header>
-    <div id="adminMsgs" style="flex:1; overflow-y:auto; padding:18px;"></div>
-  </div>
-
 <script type="module">
 import { $, api, fmtUsd, esc, fillMessages } from "/js/api.js";
 
-let currentSid = null;
-let me = null;
-
-function showMessagesPane() {
-  $("#admin").style.display = "none";
-  const p = $("#messagesPane");
-  p.style.display = "flex";
-}
-
-function showAdmin() {
-  $("#messagesPane").style.display = "none";
-  $("#admin").style.display = "block";
-}
+let students = [];
+let sessions = [];
 
 function meter(spent, budget) {
   if (!budget) return "";
@@ -82,67 +67,51 @@ function meter(spent, budget) {
   return `<div class="meter" title="${fmtUsd(spent)} of ${fmtUsd(budget)}"><i class="${cls}" style="width:${w}%"></i></div>`;
 }
 
-function statusBadge(active) {
-  return `<span class="badge ${active ? "on" : "off"}">${active ? "active" : "off"}</span>`;
-}
-
 async function loadStudents() {
   const data = await api.req("/api/admin/students");
+  students = data.students;
   const tbody = $("#students");
   tbody.innerHTML = "";
-  for (const s of data.students) {
+  for (const s of students) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${esc(s.name)}</td>
+      <td><button class="btn" data-link data-id="${esc(s.id)}">${esc(s.name)}</button></td>
       <td class="usr">${esc(s.email)}</td>
-      <td class="num">${meter(s.spent_usd, s.budget_usd)}</td>
+      <td class="num budget" data-id="${esc(s.id)}" title="Click to edit budget" style="cursor:pointer">${meter(s.spent_usd, s.budget_usd)}</td>
       <td class="num">${fmtUsd(s.spent_usd)}</td>
       <td><button class="secondary" data-act data-id="${esc(s.id)}">${s.active ? "Deactivate" : "Activate"}</button></td>`;
+    tr.querySelector("[data-link]").onclick = () => filterByStudent(s.id);
     tr.querySelector("[data-act]").onclick = async () => {
       await api.req(`/api/admin/students/${encodeURIComponent(s.id)}`, {
         method: "PATCH", body: JSON.stringify({ active: !s.active })
       });
       loadStudents();
     };
+    tr.querySelector(".budget").onclick = async () => {
+      const v = prompt("Budget (USD):", s.budget_usd);
+      if (v === null || v === "") return;
+      await api.req(`/api/admin/students/${encodeURIComponent(s.id)}`, {
+        method: "PATCH", body: JSON.stringify({ budget_usd: parseFloat(v) })
+      });
+      loadStudents();
+    };
     tbody.appendChild(tr);
   }
   $("#scratchSummary").textContent = `testing: ${fmtUsd(data.scratch_spent)} (${data.scratch_count})`;
+  populateFilter();
 }
 
-async function openSession(sid) {
-  currentSid = sid;
-  const [msgs, sessions] = await Promise.all([
-    api.req(`/api/admin/sessions/${sid}/messages`),
-    (async () => {
-      const list = await api.req("/api/admin/sessions");
-      return list.find(x => x.id === sid);
-    })()
-  ]);
-  const ses = sessions || { title: "(deleted)" };
-  $("#sesTitle").textContent = `${ses.student_name} — ${ses.title || "(untitled)"}`;
-  const status = ses.deleted ? "deleted" : ses.committed ? "committed" : "draft";
-  $("#sesMeta").textContent = `${status} · ${esc(ses.student_email || "")}`;
-  fillMessages($("#adminMsgs"), msgs);
-  showMessagesPane();
+function populateFilter() {
+  const sel = $("#sessionFilter");
+  sel.innerHTML = `<option value="">All students</option>` +
+    students.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+  sel.value = "";
 }
 
-function tagFor(s) {
-  if (s.deleted) return `<span class="tag deleted">deleted</span>`;
-  if (!s.committed) return `<span class="tag draft">draft</span>`;
-  return "";
-}
-
-async function loadSessions() {
-  const list = await api.req("/api/admin/sessions");
-  const box = $("#sessionsList");
-  box.innerHTML = "";
-  if (!list.length) {
-    box.innerHTML = `<div id="notice">No sessions yet.</div>`;
-    return;
-  }
+function sessionRows(list) {
   const table = document.createElement("table");
   table.className = "data";
-  table.innerHTML = `<thead><tr><th>Student</th><th>Title</th><th>News</th><th>Updated</th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Student</th><th>Title</th><th>Status</th><th>Updated</th></tr></thead>`;
   const tbody = document.createElement("tbody");
   for (const s of list) {
     const tr = document.createElement("tr");
@@ -157,19 +126,81 @@ async function loadSessions() {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  box.appendChild(table);
+  return table;
+}
+
+function tagFor(s) {
+  if (s.deleted) return `<span class="tag deleted">deleted</span>`;
+  if (!s.committed) return `<span class="tag draft">draft</span>`;
+  return "";
+}
+
+async function loadSessions() {
+  sessions = await api.req("/api/admin/sessions");
+  renderSessions();
+}
+
+function renderSessions() {
+  const box = $("#sessionsList");
+  box.innerHTML = "";
+  const filter = $("#sessionFilter").value;
+  const list = filter ? sessions.filter(s => s.student_id === filter) : sessions;
+  if (!list.length) {
+    box.innerHTML = `<div id="notice">No sessions${filter ? " for this student" : ""}.</div>`;
+    return;
+  }
+  box.appendChild(sessionRows(list));
+}
+
+function filterByStudent(id) {
+  $("#sessionFilter").value = id;
+  showTab("sessions");   // exitDrill() inside renders with the new filter
+}
+
+async function openSession(sid) {
+  const ses = sessions.find(x => x.id === sid) || { title: "(deleted)" };
+  const msgs = await api.req(`/api/admin/sessions/${sid}/messages`);
+  $("#sessionsTitle").textContent = `${ses.student_name} — ${ses.title || "(untitled)"}`;
+  $("#drillBack").style.display = "";
+  $("#sessionFilter").style.display = "none";
+  $("#refresh").style.display = "none";
+  const box = $("#sessionsList");
+  box.innerHTML = "";
+  if (!msgs.length) {
+    box.innerHTML = `<div id="notice">No messages.</div>`;
+    return;
+  }
+  fillMessages(box, msgs);
+}
+
+function exitDrill() {
+  $("#drillBack").style.display = "none";
+  $("#sessionFilter").style.display = "";
+  $("#refresh").style.display = "";
+  $("#sessionsTitle").textContent = "Sessions";
+  renderSessions();
+}
+
+function showTab(name) {
+  $("#studentsPane").classList.toggle("active", name === "students");
+  $("#sessionsPane").classList.toggle("active", name === "sessions");
+  $("#tabStudents").classList.toggle("active", name === "students");
+  $("#tabSessions").classList.toggle("active", name === "sessions");
+  if (name === "sessions") exitDrill();
 }
 
 $("#logout").onclick = () => { location.href = "/logout"; };
-$("#backBtn").onclick = () => { showAdmin(); loadSessions(); };
+$("#tabStudents").onclick = () => showTab("students");
+$("#tabSessions").onclick = () => showTab("sessions");
+$("#drillBack").onclick = exitDrill;
 $("#refresh").onclick = loadSessions;
+$("#sessionFilter").onchange = renderSessions;
 
 $("#addStudent").onsubmit = async (e) => {
   e.preventDefault();
   await api.req("/api/admin/students", {
     method: "POST", body: JSON.stringify({
       email: $("#newEmail").value.trim(),
-      id: $("#newID").value.trim(),
       name: $("#newName").value.trim(),
       budget_usd: parseFloat($("#newBudget").value) || 0
     })
@@ -180,7 +211,7 @@ $("#addStudent").onsubmit = async (e) => {
 
 (async () => {
   try {
-    me = await api.req("/api/me");
+    const me = await api.req("/api/me");
     if (me.role !== "admin") { location.href = "/"; return; }
     $("#meName").textContent = me.email;
   } catch (e) {
