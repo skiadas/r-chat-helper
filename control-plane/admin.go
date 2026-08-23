@@ -166,6 +166,26 @@ func (a *App) handleAdminScratchLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, a.cfg.PublicURL+"/", http.StatusFound)
 }
 
+// handleAdminScratchReturn is the round-trip back out of a scratch test
+// session: it re-issues the instructor's admin token so they can return to
+// the dashboard without logging out. Only reachable while holding a scratch
+// (student) token, whose email is the admin's own, so it cannot be used to
+// mint admin tokens from a real student session.
+func (a *App) handleAdminScratchReturn(w http.ResponseWriter, r *http.Request) {
+	c := claimsOf(r)
+	if c == nil || !c.Scratch {
+		writeErr(w, http.StatusForbidden, "not in a test session")
+		return
+	}
+	token, err := a.issueToken(c.Email, RoleAdmin, "")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not return to admin view")
+		return
+	}
+	a.setSessionCookie(w, token)
+	http.Redirect(w, r, a.cfg.PublicURL+"/admin.html", http.StatusFound)
+}
+
 // micros converts a dollar amount to integer micro-dollars.
 func micros(usd float64) int64 {
 	return int64(usd * 1e6)

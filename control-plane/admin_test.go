@@ -245,3 +245,107 @@ func TestScratchLoginIssuesScratchClaim(t *testing.T) {
 		t.Fatalf("scratch claims = %+v", claims)
 	}
 }
+
+// TestScratchReturnReissuesAdmin verifies the scratch round-trip: holding a
+// scratch (student) token, the return endpoint mints an admin token and
+// redirects to the dashboard.
+func TestScratchReturnReissuesAdmin(t *testing.T) {
+	app := newAdminApp(t)
+
+	// Obtain a scratch token via scratch-login.
+	scratch := scratchToken(t, app)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-return", nil)
+	req.AddCookie(scratch)
+	rec := httptest.NewRecorder()
+	app.authenticate(http.HandlerFunc(app.handleAdminScratchReturn)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("scratch return = %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Location"), "/admin.html") {
+		t.Fatalf("redirect location = %q, want /admin.html", rec.Header().Get("Location"))
+	}
+	var adminCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			adminCookie = c
+		}
+	}
+	if adminCookie == nil {
+		t.Fatal("scratch return set no session cookie")
+	}
+	claims, err := app.parseToken(adminCookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Role != RoleAdmin || claims.Scratch {
+		t.Fatalf("return claims = %+v, want clean admin", claims)
+	}
+	if claims.Email != "instructor@college.edu" {
+		t.Fatalf("return claims email = %q", claims.Email)
+	}
+}
+
+// TestScratchReturnRejectsRealStudent verifies a real student token cannot
+// mint an admin token via the return endpoint.
+func TestScratchReturnRejectsRealStudent(t *testing.T) {
+	app := newDevLoginApp(t, "alice@college.edu")
+	if err := app.AddStudent(t.Context(), "alice", "alice@college.edu", "Alice", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	app.handleOIDCLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	var studentCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			studentCookie = c
+		}
+	}
+	if studentCookie == nil {
+		t.Fatal("student login set no session cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-return", nil)
+	req.AddCookie(studentCookie)
+	w := httptest.NewRecorder()
+	app.authenticate(http.HandlerFunc(app.handleAdminScratchReturn)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("student calling scratch-return = %d, want 403", w.Code)
+	}
+}
+
+// scratchToken signs the instructor into the scratch test identity and
+// returns the resulting session cookie.
+func scratchToken(t *testing.T, app *App) *http.Cookie {
+	t.Helper()
+	adminRec := httptest.NewRecorder()
+	app.handleOIDCLogin(adminRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	var adminCookie *http.Cookie
+	for _, c := range adminRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			adminCookie = c
+		}
+	}
+	if adminCookie == nil {
+		t.Fatal("admin login set no session cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-login", nil)
+	req.AddCookie(adminCookie)
+	rec := httptest.NewRecorder()
+	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminScratchLogin))).ServeHTTP(rec, req)
+
+	var scratchCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			scratchCookie = c
+		}
+	}
+	if scratchCookie == nil {
+		t.Fatal("scratch login set no session cookie")
+	}
+	return scratchCookie
+}

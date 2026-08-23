@@ -36,6 +36,7 @@ func (a *App) Run(ctx context.Context) error {
 	mux.Handle("GET /api/admin/sessions", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminListSessions))))
 	mux.Handle("GET /api/admin/sessions/{id}/messages", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminSessionMessages))))
 	mux.Handle("GET /api/admin/scratch-login", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminScratchLogin))))
+	mux.Handle("GET /api/admin/scratch-return", a.authenticate(http.HandlerFunc(a.handleAdminScratchReturn)))
 
 	mux.Handle("/", uiHandler())
 
