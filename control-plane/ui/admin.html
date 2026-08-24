@@ -23,7 +23,7 @@
         <form id="addStudent" class="row" autocomplete="off">
           <input id="newEmail" type="email" placeholder="email" required>
           <input id="newName" placeholder="name" required>
-          <input id="newBudget" type="number" min="0" step="0.01" placeholder="budget $" style="width:90px">
+          <input id="newBudget" type="number" min="0.01" step="0.01" placeholder="budget $" required style="width:90px">
           <button type="submit">Add</button>
         </form>
         <div class="pane-head">
@@ -59,12 +59,17 @@ import { $, api, fmtUsd, esc, fillMessages } from "/js/api.js";
 let students = [];
 let sessions = [];
 
+function money1(v) { return "$" + (v || 0).toFixed(1); }
+
 function meter(spent, budget) {
-  if (!budget) return "";
+  if (!budget) return `<span class="meter-label" style="color:var(--red)">no budget</span>`;
   const frac = budget > 0 ? spent / budget : 0;
   const cls = frac >= 1 ? "over" : frac >= 0.8 ? "warn" : "";
   const w = Math.min(100, Math.round(frac * 100));
-  return `<div class="meter" title="${fmtUsd(spent)} of ${fmtUsd(budget)}"><i class="${cls}" style="width:${w}%"></i></div>`;
+  return `<span class="meter-cell">
+            <span class="meter" title="${fmtUsd(spent)} of ${fmtUsd(budget)}"><i class="${cls}" style="width:${w}%"></i></span>
+            <span class="meter-label">${money1(spent)} / ${money1(budget)}</span>
+          </span>`;
 }
 
 async function loadStudents() {
@@ -75,7 +80,8 @@ async function loadStudents() {
   for (const s of students) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><button class="btn" data-link data-id="${esc(s.id)}">${esc(s.name)}</button></td>
+      <td><button class="btn" data-link data-id="${esc(s.id)}">${esc(s.name)}</button>
+        ${s.test ? `<span class="tag draft">test</span>` : ""}</td>
       <td class="usr">${esc(s.email)}</td>
       <td class="num budget" data-id="${esc(s.id)}" title="Click to edit budget" style="cursor:pointer">${meter(s.spent_usd, s.budget_usd)}</td>
       <td class="num">${fmtUsd(s.spent_usd)}</td>
@@ -97,7 +103,6 @@ async function loadStudents() {
     };
     tbody.appendChild(tr);
   }
-  $("#scratchSummary").textContent = `testing: ${fmtUsd(data.scratch_spent)} (${data.scratch_count})`;
   populateFilter();
 }
 
@@ -198,11 +203,12 @@ $("#sessionFilter").onchange = renderSessions;
 
 $("#addStudent").onsubmit = async (e) => {
   e.preventDefault();
+  const budget = parseFloat($("#newBudget").value);
   await api.req("/api/admin/students", {
     method: "POST", body: JSON.stringify({
       email: $("#newEmail").value.trim(),
       name: $("#newName").value.trim(),
-      budget_usd: parseFloat($("#newBudget").value) || 0
+      budget_usd: budget
     })
   });
   e.target.reset();

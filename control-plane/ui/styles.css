@@ -106,5 +106,7 @@ tr.strike td { opacity:.45; }
 .meter i { display:block; height:100%; background:var(--accent); }
 .meter i.warn { background:#e5c07b; }
 .meter i.over { background:var(--red); }
+.meter-cell { display:inline-flex; align-items:center; gap:8px; }
+.meter-label { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
 form.row { display:flex; gap:8px; padding:12px 16px; border-bottom:1px solid var(--border); }
 form.row input[type=number] { width:90px; }
