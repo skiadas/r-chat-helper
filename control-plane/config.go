@@ -39,6 +39,7 @@ type Config struct {
 
 const (
 	sessionCookieName = "rc_session"
+	modeCookieName    = "rc_mode"
 	oidcStateCookie   = "oidc_state"
 	sessionTTL        = 12 * time.Hour
 	oidcStateTTL      = 10 * time.Minute

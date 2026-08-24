@@ -216,7 +216,10 @@ func TestAdminSessionsIncludeStudentID(t *testing.T) {
 	}
 }
 
-func TestScratchLoginIssuesScratchClaim(t *testing.T) {
+// TestScratchLoginSetsMarker verifies entering a test session leaves the
+// (admin) token untouched and instead sets the rc_mode marker to the scratch
+// identity.
+func TestScratchLoginSetsMarker(t *testing.T) {
 	app := newAdminApp(t)
 	cookie := adminToken(t, app)
 
@@ -228,73 +231,95 @@ func TestScratchLoginIssuesScratchClaim(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("scratch login = %d body %s", rec.Code, rec.Body.String())
 	}
-	var scratchCookie *http.Cookie
+	// The admin token must survive unchanged; only the marker is added.
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			scratchCookie = c
+		if c.Name == sessionCookieName && c.Value != cookie.Value {
+			t.Fatal("scratch login replaced the admin token; it should only set the marker")
 		}
 	}
-	if scratchCookie == nil {
-		t.Fatal("scratch login set no session cookie")
-	}
-	claims, err := app.parseToken(scratchCookie.Value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !claims.Scratch || claims.Role != RoleStudent || claims.StudentID != "scratch:instructor@college.edu" {
-		t.Fatalf("scratch claims = %+v", claims)
+	marker := modeCookie(t, rec)
+	if marker == nil || !strings.HasPrefix(marker.Value, "scratch:") {
+		t.Fatalf("scratch login marker = %+v, want scratch identity", marker)
 	}
 }
 
-// TestScratchReturnReissuesAdmin verifies the scratch round-trip: holding a
-// scratch (student) token, the return endpoint mints an admin token and
-// redirects to the dashboard.
-func TestScratchReturnReissuesAdmin(t *testing.T) {
-	app := newAdminApp(t)
+func modeCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == modeCookieName {
+			return c
+		}
+	}
+	return nil
+}
 
-	// Obtain a scratch token via scratch-login.
-	scratch := scratchToken(t, app)
+// TestMarkerNarrowsAdminScope proves a marked admin sees the student surface:
+// /api/me reports the scratch student, and admin endpoints are denied.
+func TestMarkerNarrowsAdminScope(t *testing.T) {
+	app := newAdminApp(t)
+	cookie := adminToken(t, app)
+	marker := modeCookie(t, markAdmin(t, app, cookie))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req.AddCookie(cookie)
+	req.AddCookie(marker)
+	rec := httptest.NewRecorder()
+	app.authenticate(http.HandlerFunc(app.handleMe)).ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), `"role":"student"`) || !strings.Contains(rec.Body.String(), `"scratch":true`) {
+		t.Fatalf("marked /api/me = %s, want scratch student view", rec.Body.String())
+	}
+
+	// Admin scope is denied while marked.
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/admin/students", nil)
+	adminReq.AddCookie(cookie)
+	adminReq.AddCookie(marker)
+	adminRec := httptest.NewRecorder()
+	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminListStudents))).ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusForbidden {
+		t.Fatalf("marked admin calling /api/admin/students = %d, want 403", adminRec.Code)
+	}
+}
+
+// TestScratchReturnClearsMarker verifies the round-trip: clearing the marker
+// restores the admin scope without touching the token.
+func TestScratchReturnClearsMarker(t *testing.T) {
+	app := newAdminApp(t)
+	cookie := adminToken(t, app)
+	marker := modeCookie(t, markAdmin(t, app, cookie))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-return", nil)
-	req.AddCookie(scratch)
+	req.AddCookie(cookie)
+	req.AddCookie(marker)
 	rec := httptest.NewRecorder()
 	app.authenticate(http.HandlerFunc(app.handleAdminScratchReturn)).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("scratch return = %d body %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "/admin.html") {
+		t.Fatalf("scratch return = %d %q, want redirect to admin", rec.Code, rec.Header().Get("Location"))
 	}
-	if !strings.Contains(rec.Header().Get("Location"), "/admin.html") {
-		t.Fatalf("redirect location = %q, want /admin.html", rec.Header().Get("Location"))
+	cleared := modeCookie(t, rec)
+	if cleared == nil || cleared.MaxAge != -1 {
+		t.Fatalf("scratch return did not clear the marker: %+v", cleared)
 	}
-	var adminCookie *http.Cookie
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			adminCookie = c
-		}
-	}
-	if adminCookie == nil {
-		t.Fatal("scratch return set no session cookie")
-	}
-	claims, err := app.parseToken(adminCookie.Value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claims.Role != RoleAdmin || claims.Scratch {
-		t.Fatalf("return claims = %+v, want clean admin", claims)
-	}
-	if claims.Email != "instructor@college.edu" {
-		t.Fatalf("return claims email = %q", claims.Email)
+
+	// With the marker gone, the same admin token is admin again.
+	me := httptest.NewRecorder()
+	j := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	j.AddCookie(cookie)
+	app.authenticate(http.HandlerFunc(app.handleMe)).ServeHTTP(me, j)
+	if !strings.Contains(me.Body.String(), `"role":"admin"`) {
+		t.Fatalf("unmarked /api/me = %s, want admin", me.Body.String())
 	}
 }
 
-// TestScratchReturnRejectsRealStudent verifies a real student token cannot
-// mint an admin token via the return endpoint.
-func TestScratchReturnRejectsRealStudent(t *testing.T) {
+// TestScratchReturnClearsMarkerForStudent verifies a real student calling the
+// return endpoint just clears a marker they never had; the response is the
+// same redirect, and they still cannot reach admin scope.
+func TestScratchReturnClearsMarkerForStudent(t *testing.T) {
 	app := newDevLoginApp(t, "alice@college.edu")
 	if err := app.AddStudent(t.Context(), "alice", "alice@college.edu", "Alice", 0); err != nil {
 		t.Fatal(err)
 	}
-
 	rec := httptest.NewRecorder()
 	app.handleOIDCLogin(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
 	var studentCookie *http.Cookie
@@ -312,40 +337,26 @@ func TestScratchReturnRejectsRealStudent(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.authenticate(http.HandlerFunc(app.handleAdminScratchReturn)).ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("student calling scratch-return = %d, want 403", w.Code)
+	if w.Code != http.StatusFound {
+		t.Fatalf("student calling scratch-return = %d, want the same redirect", w.Code)
+	}
+	// A student token can never become admin: admin endpoints remain denied.
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/admin/students", nil)
+	adminReq.AddCookie(studentCookie)
+	adminRec := httptest.NewRecorder()
+	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminListStudents))).ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusForbidden {
+		t.Fatalf("student after scratch-return = %d, want 403 on admin", adminRec.Code)
 	}
 }
 
-// scratchToken signs the instructor into the scratch test identity and
-// returns the resulting session cookie.
-func scratchToken(t *testing.T, app *App) *http.Cookie {
+// markAdmin performs the scratch-login and returns the recorder so the caller
+// can read the rc_mode cookie it set.
+func markAdmin(t *testing.T, app *App, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
-	adminRec := httptest.NewRecorder()
-	app.handleOIDCLogin(adminRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
-	var adminCookie *http.Cookie
-	for _, c := range adminRec.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			adminCookie = c
-		}
-	}
-	if adminCookie == nil {
-		t.Fatal("admin login set no session cookie")
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-login", nil)
-	req.AddCookie(adminCookie)
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminScratchLogin))).ServeHTTP(rec, req)
-
-	var scratchCookie *http.Cookie
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName {
-			scratchCookie = c
-		}
-	}
-	if scratchCookie == nil {
-		t.Fatal("scratch login set no session cookie")
-	}
-	return scratchCookie
+	return rec
 }

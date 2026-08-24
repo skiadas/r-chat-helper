@@ -146,10 +146,9 @@ func (a *App) handleAdminSessionMessages(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleAdminScratchLogin signs the instructor in as a scratch student
-// identity so they can experience the student flow without touching any real
-// student's allocation. Spend under the scratch identity is tracked
-// separately in the admin view.
+// handleAdminScratchLogin drops the instructor into their scratch test
+// identity by setting the rc_mode marker (the token is untouched). Spend
+// under the scratch identity is tracked separately in the admin view.
 func (a *App) handleAdminScratchLogin(w http.ResponseWriter, r *http.Request) {
 	c := claimsOf(r)
 	s, err := a.EnsureScratchStudent(r.Context(), c.Email)
@@ -157,32 +156,17 @@ func (a *App) handleAdminScratchLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to create test identity")
 		return
 	}
-	token, err := a.issueTokenScratch(s.Email, RoleStudent, s.ID, true)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "could not start a session")
-		return
-	}
-	a.setSessionCookie(w, token)
+	a.setModeCookie(w, s.ID)
 	http.Redirect(w, r, a.cfg.PublicURL+"/", http.StatusFound)
 }
 
-// handleAdminScratchReturn is the round-trip back out of a scratch test
-// session: it re-issues the instructor's admin token so they can return to
-// the dashboard without logging out. Only reachable while holding a scratch
-// (student) token, whose email is the admin's own, so it cannot be used to
-// mint admin tokens from a real student session.
+// handleAdminScratchReturn is the round-trip back out of a test session: it
+// clears the rc_mode marker so the (still-present) admin token regains its
+// full scope and the instructor lands on the dashboard. Because the token
+// never changed, no privilege is minted here — the marker can only narrow,
+// so clearing it is always safe.
 func (a *App) handleAdminScratchReturn(w http.ResponseWriter, r *http.Request) {
-	c := claimsOf(r)
-	if c == nil || !c.Scratch {
-		writeErr(w, http.StatusForbidden, "not in a test session")
-		return
-	}
-	token, err := a.issueToken(c.Email, RoleAdmin, "")
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "could not return to admin view")
-		return
-	}
-	a.setSessionCookie(w, token)
+	a.clearModeCookie(w)
 	http.Redirect(w, r, a.cfg.PublicURL+"/admin.html", http.StatusFound)
 }
 

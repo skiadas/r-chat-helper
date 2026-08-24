@@ -16,25 +16,25 @@ type claims struct {
 	Email     string `json:"email"`
 	Role      string `json:"role"`
 	StudentID string `json:"sid,omitempty"`
-	Scratch   bool   `json:"scratch,omitempty"`
+	// Scratch is set only on the *effective* claims of a marked session (see
+	// authenticate); tokens never carry it. It flips the authorization scope
+	// from admin to the admin's test student identity.
+	Scratch bool `json:"-"`
 	jwt.RegisteredClaims
 }
 
 var errNoAuth = errors.New("missing or invalid credentials")
 
+// issueToken mints a clean identity token. The token never carries mode
+// state: an instructor's test session is signaled by the rc_mode cookie, not
+// by the token, so navigation between the admin and student views never
+// crosses an identity change.
 func (a *App) issueToken(email, role, studentID string) (string, error) {
-	return a.issueTokenScratch(email, role, studentID, false)
-}
-
-// issueTokenScratch issues a token; the scratch flag marks an instructor's
-// test identity so the UI can surface it.
-func (a *App) issueTokenScratch(email, role, studentID string, scratch bool) (string, error) {
 	now := time.Now()
 	c := claims{
 		Email:     email,
 		Role:      role,
 		StudentID: studentID,
-		Scratch:   scratch,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   email,
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -75,8 +75,9 @@ func (a *App) claimsFromRequest(r *http.Request) (*claims, error) {
 	return nil, errNoAuth
 }
 
-// authenticate verifies the session token and, for student roles, loads the
-// student record into the request context.
+// authenticate verifies the session token, resolves the effective identity
+// (the token plus any rc_mode marker), and for student-role identities loads
+// the student record into the request context.
 func (a *App) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := a.claimsFromRequest(r)
@@ -84,6 +85,7 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
+		c = a.effectiveClaims(w, r, c)
 		ctx := context.WithValue(r.Context(), ctxKeyClaims{}, c)
 		if c.Role == RoleStudent {
 			s, err := a.StudentByID(r.Context(), c.StudentID)
@@ -95,6 +97,28 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// effectiveClaims narrows an admin token to the admin's scratch student
+// identity when the rc_mode marker is present. Privilege always comes from the
+// token: the marker can only shrink scope (to a student), never widen it, and
+// it is only honored when the token is an admin and the marker names that
+// admin's own scratch student. A stale marker (missing student row, wrong
+// owner) is cleared and ignored.
+func (a *App) effectiveClaims(w http.ResponseWriter, r *http.Request, c *claims) *claims {
+	if c.Role != RoleAdmin {
+		return c
+	}
+	mode, err := r.Cookie(modeCookieName)
+	if err != nil || mode.Value == "" {
+		return c
+	}
+	s, err := a.StudentByID(r.Context(), mode.Value)
+	if err != nil || s == nil || s.Email != c.Email {
+		a.clearModeCookie(w)
+		return c
+	}
+	return &claims{Email: c.Email, Role: RoleStudent, StudentID: s.ID, Scratch: true}
 }
 
 type ctxKeyClaims struct{}
@@ -127,6 +151,33 @@ func (a *App) setSessionCookie(w http.ResponseWriter, token string) {
 func (a *App) clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   a.cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
+// setModeCookie records the student id the instructor is currently acting as
+// (their scratch test identity). The marker narrows an admin token to student
+// scope; it is the sole mechanism for the admin <-> student round-trip.
+func (a *App) setModeCookie(w http.ResponseWriter, studentID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     modeCookieName,
+		Value:    studentID,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   a.cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(a.cfg.sessionTTL / time.Second),
+	})
+}
+
+func (a *App) clearModeCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     modeCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,

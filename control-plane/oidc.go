@@ -214,6 +214,7 @@ func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	a.clearSessionCookie(w)
+	a.clearModeCookie(w)
 	http.Redirect(w, r, a.cfg.PublicURL+"/", http.StatusFound)
 }
 
