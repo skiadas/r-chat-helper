@@ -49,3 +49,52 @@ func TestRenderMarkdownBasic(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderMarkdownBareURLBecomesLink(t *testing.T) {
+	out, err := renderMarkdown("See https://ggplot2.tidyverse.org/reference/coord_polar.html for details.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `href="https://ggplot2.tidyverse.org/reference/coord_polar.html" target="_blank" rel="noopener noreferrer"`
+	if !strings.Contains(out, want) {
+		t.Fatalf("bare URL did not linkify with new-tab attrs:\n%s", out)
+	}
+}
+
+func TestRenderMarkdownURLInCodeStaysLiteral(t *testing.T) {
+	src := "```r\nurl <- \"https://example.com/api\"\n```"
+	out, err := renderMarkdown(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "<a ") {
+		t.Fatalf("URL inside a code block became a link:\n%s", out)
+	}
+	if !strings.Contains(out, "https://example.com/api") {
+		t.Fatalf("URL text lost inside code block:\n%s", out)
+	}
+}
+
+func TestRenderMarkdownExplicitLinkGetsNewTabAttrs(t *testing.T) {
+	out, err := renderMarkdown("[tidyverse](https://www.tidyverse.org/)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `href="https://www.tidyverse.org/" target="_blank" rel="noopener noreferrer">tidyverse</a>`
+	if !strings.Contains(out, want) {
+		t.Fatalf("explicit link missing new-tab attrs:\n%s", out)
+	}
+}
+
+func TestRenderMarkdownDangerousLinkKeepsTextNoHref(t *testing.T) {
+	out, err := renderMarkdown("[click](javascript:alert(1))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, `href="javascript:`) {
+		t.Fatalf("dangerous javascript: link got a href:\n%s", out)
+	}
+	if !strings.Contains(out, ">click</a>") {
+		t.Fatalf("dangerous link lost its anchor text:\n%s", out)
+	}
+}
