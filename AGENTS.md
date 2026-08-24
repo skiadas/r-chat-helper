@@ -48,6 +48,7 @@ README; for invariants, read below.
 - Commit in small, reviewable increments; never commit keys, student data, or
   `.env` files.
 - `RC_` env prefix for control-plane config (see `control-plane/config.go`).
+- Open work is tracked in `TODO.md` (kept out of git by choice).
 
 ## Common commands
 
