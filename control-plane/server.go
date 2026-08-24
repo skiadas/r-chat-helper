@@ -25,6 +25,8 @@ func (a *App) Run(ctx context.Context) error {
 	mux.Handle("GET /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleListSessions)))
 	mux.Handle("POST /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleCreateSession)))
 	mux.Handle("GET /api/me/sessions/current", a.authenticate(http.HandlerFunc(a.handleCurrentSession)))
+	mux.Handle("POST /api/me/sessions/from-summary", a.authenticate(http.HandlerFunc(a.handleStartFromSummary)))
+	mux.Handle("POST /api/me/sessions/from-topic", a.authenticate(http.HandlerFunc(a.handleStartFromTopic)))
 	mux.Handle("GET /api/me/sessions/{id}/messages", a.authenticate(http.HandlerFunc(a.handleMessages)))
 	mux.Handle("POST /api/me/sessions/{id}/messages", a.authenticate(http.HandlerFunc(a.handleSend)))
 	mux.Handle("PATCH /api/me/sessions/{id}", a.authenticate(http.HandlerFunc(a.handleRenameSession)))
@@ -159,10 +161,11 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(sessions))
 	for _, ses := range sessions {
 		out = append(out, map[string]any{
-			"id":       ses.ID,
-			"title":    ses.Title,
-			"created":  ses.CreatedAt,
-			"cost_usd": float64(spend[ses.ID]) / 1e6,
+			"id":           ses.ID,
+			"title":        ses.Title,
+			"created":      ses.CreatedAt,
+			"cost_usd":     float64(spend[ses.ID]) / 1e6,
+			"summarizable": !ses.HasSummary,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -212,6 +215,62 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": ses.ID, "title": ses.Title})
+}
+
+// handleStartFromSummary is a thin adapter over startFromSummary: it parses
+// the request and maps the lifecycle sentinels to HTTP statuses.
+func (a *App) handleStartFromSummary(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.requireStudent(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		SourceID string `json:"source_id"`
+	}
+	if err := readJSON(r, &req); err != nil || req.SourceID == "" {
+		writeErr(w, http.StatusBadRequest, "source_id required")
+		return
+	}
+	ses, summarized, err := a.startFromSummary(r.Context(), s.ID, req.SourceID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			writeErr(w, http.StatusNotFound, "session not found")
+			return
+		case errors.Is(err, ErrAlreadySummarized):
+			writeErr(w, http.StatusConflict, "this session was already created from a summary; start a fresh conversation instead")
+			return
+		default:
+			writeErr(w, http.StatusInternalServerError, "failed to create session")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": ses.ID, "summarized": summarized})
+}
+
+// handleStartFromTopic is a thin adapter over startFromTopic.
+func (a *App) handleStartFromTopic(w http.ResponseWriter, r *http.Request) {
+	s, ok := a.requireStudent(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		SourceID string `json:"source_id"`
+	}
+	if err := readJSON(r, &req); err != nil || req.SourceID == "" {
+		writeErr(w, http.StatusBadRequest, "source_id required")
+		return
+	}
+	ses, err := a.startFromTopic(r.Context(), s.ID, req.SourceID)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			writeErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": ses.ID})
 }
 
 // handleRenameSession renames a session owned by the student.
@@ -304,6 +363,23 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Session size cap: measured as the last completed turn's prompt tokens,
+	// which is the context the next turn would replay plus a fresh answer. At
+	// the cap a send is refused and the student is offered a fresh session.
+	ses, err := a.Session(r.Context(), sid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load session")
+		return
+	}
+	if allowed, summaryAvailable := acceptsTurn(ses, a.cfg.SessionMaxTokens); !allowed {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":             "This conversation reached its size limit. Start a new one to keep going.",
+			"code":              "session_full",
+			"summary_available": summaryAvailable,
+		})
+		return
+	}
+
 	// Persist the user turn.
 	if err := a.AddMessage(r.Context(), sid, "user", req.Text, ""); err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to save message")
@@ -316,7 +392,11 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load messages")
 		return
 	}
-	resp, err := a.client.send(r.Context(), msgs)
+	summary := ""
+	if ses != nil {
+		summary = ses.Summary
+	}
+	resp, err := a.client.send(r.Context(), msgs, summary)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "model request failed: "+err.Error())
 		return
@@ -325,6 +405,9 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.RecordInteraction(context.Background(), s.ID, sid, a.cfg.LocksModel,
 		Tokens{Input: resp.Usage.Input, Output: resp.Usage.Output, CacheRead: resp.Usage.CacheRead}); err != nil {
 		log.Printf("cost: failed to record usage for %s/%s: %v", s.ID, sid, err)
+	}
+	if err := a.SetSessionPromptTokens(r.Context(), sid, resp.Usage.Input); err != nil {
+		log.Printf("session: failed to record prompt tokens for %s: %v", sid, err)
 	}
 
 	// Persist the assistant turn: what the student sees plus a model-facing
@@ -346,6 +429,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 		"cost_usd":  float64(spentAfter-spentBefore) / 1e6,
 		"spent_usd": float64(spentAfter) / 1e6,
 		"committed": committed,
+		"new_topic": resp.NewTopic,
 	})
 }
 

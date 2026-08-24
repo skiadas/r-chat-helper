@@ -61,6 +61,10 @@ header .meta { color:var(--muted); font-size:13px; flex:1; }
 .msg .cost { font-size:12px; color:var(--muted); margin-top:4px; }
 .error { color:var(--red); }
 
+/* inline offers (new-topic suggestion, session-size-cap continuation) */
+.offer { max-width:760px; margin:0 auto 14px; background:var(--panel); border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:10px; padding:10px 12px; color:var(--muted); font-size:13px; }
+.offer button { margin:8px 8px 0 0; padding:7px 12px; font-size:13px; }
+
 /* typing indicator: three dots, accent color sweeps left to right */
 .typing { display:inline-flex; gap:6px; align-items:center; padding:2px 0; }
 .typing i { width:7px; height:7px; border-radius:50%; background:var(--muted); animation:typing-pulse 1.4s ease-in-out infinite; }

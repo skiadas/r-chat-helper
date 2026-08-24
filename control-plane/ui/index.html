@@ -105,8 +105,17 @@ function sessionMenuBtn(id, ev) {
   pop.className = "menu-pop";
   pop.style.left = rect.left + "px";
   pop.style.top = (rect.bottom + 4) + "px";
+  const cont = document.createElement("button"); cont.textContent = "Continue from summary"; cont.onclick = async () => {
+    closeMenus();
+    const r = await api.req("/api/me/sessions/from-summary", { method: "POST", body: JSON.stringify({ source_id: id }) });
+    openSession(r.id); loadSessions();
+  };
   const ren = document.createElement("button"); ren.textContent = "Rename"; ren.onclick = () => { closeMenus(); renameSession(id); };
   const del = document.createElement("button"); del.textContent = "Delete"; del.className = "danger"; del.onclick = () => { closeMenus(); deleteSession(id); };
+  // The once-only rule is enforced server-side; hide the item for sessions
+  // already created from a summary.
+  const side = ev.currentTarget.closest(".session");
+  if (side && side.dataset.summarizable === "1") pop.append(cont);
   pop.append(ren, del);
   document.body.appendChild(pop);
 }
@@ -121,6 +130,7 @@ async function loadSessions() {
     el.innerHTML = `<div class="t">${esc(s.title || "(untitled)")}</div>
       <div class="m">${fmtUsd(s.cost_usd)}</div>
       <button class="menu-btn" title="More">⋯</button>`;
+    el.dataset.summarizable = s.summarizable ? "1" : "";
     el.onclick = () => openSession(s.id);
     el.querySelector(".menu-btn").onclick = (ev) => sessionMenuBtn(s.id, ev);
     $("#sessions").appendChild(el);
@@ -146,11 +156,7 @@ async function openSession(id) {
   $("#messages").scrollTop = $("#messages").scrollHeight;
 }
 
-async function send() {
-  const text = $("#prompt").value.trim();
-  if (!text) return;
-  $("#prompt").value = "";
-  const sid = await ensureSession();
+async function doSend(sid, text) {
   const el = document.createElement("div");
   el.className = "msg user";
   el.innerHTML = `<div class="role">you</div><div class="bubble">${esc(text)}</div>`;
@@ -170,10 +176,66 @@ async function send() {
       <div class="cost">this turn: ${fmtUsd(r.cost_usd)} · total: ${fmtUsd(r.spent_usd)}</div>`;
     refreshMe();
     loadSessions();
+    if (r.new_topic) offerNewTopic(sid);
   } catch (e) {
-    thinking.innerHTML = `<div class="role">assistant</div><div class="bubble error">${esc(e.message)}</div>`;
+    thinking.remove();
+    if (e.code === "session_full") {
+      // The conversation hit its size cap: park the typed question and offer
+      // a continuation so nothing is lost.
+      offerSessionFull(sid, text, !!e.data.summary_available);
+    } else {
+      const errEl = document.createElement("div");
+      errEl.className = "msg assistant";
+      errEl.innerHTML = `<div class="role">assistant</div><div class="bubble error">${esc(e.message)}</div>`;
+      $("#messages").appendChild(errEl);
+    }
   }
   $("#messages").scrollTop = $("#messages").scrollHeight;
+}
+
+async function send() {
+  const text = $("#prompt").value.trim();
+  if (!text) return;
+  $("#prompt").value = "";
+  const sid = await ensureSession();
+  await doSend(sid, text);
+}
+
+// offerNewTopic follows the tutor's "this looks like a new topic" signal: a
+// one-click fresh session seeded with the last exchange, carrying no summary.
+function offerNewTopic(sid) {
+  const note = document.createElement("div");
+  note.className = "offer";
+  note.innerHTML = `It looks like you started a new topic. Start a fresh conversation to keep things focused? 
+    <button id="newTopicBtn">Start new topic</button>`;
+  $("#messages").appendChild(note);
+  note.querySelector("#newTopicBtn").onclick = async () => {
+    const r = await api.req("/api/me/sessions/from-topic", { method: "POST", body: JSON.stringify({ source_id: sid }) });
+    openSession(r.id); loadSessions();
+  };
+}
+
+// offerSessionFull renders the choice at the session size cap. The typed
+// question is parked and re-sent as the first turn of the fresh session.
+function offerSessionFull(sid, text, canSummary) {
+  const note = document.createElement("div");
+  note.className = "offer";
+  note.innerHTML = `This conversation reached its size limit. Start a new one to keep going —
+    your question is ready to send there.<br>
+    <button id="fullColdBtn">Start new conversation</button>
+    ${canSummary ? `<button id="fullSummaryBtn">Continue from a summary</button>` : ""}`;
+  $("#messages").appendChild(note);
+  note.querySelector("#fullColdBtn").onclick = async () => {
+    const r = await api.req("/api/me/sessions", { method: "POST", body: JSON.stringify({}) });
+    openSession(r.id); loadSessions();
+    await doSend(r.id, text);
+  };
+  if (canSummary) note.querySelector("#fullSummaryBtn").onclick = async () => {
+    const r = await api.req("/api/me/sessions/from-summary", { method: "POST", body: JSON.stringify({ source_id: sid }) });
+    openSession(r.id); loadSessions();
+    await doSend(r.id, text);
+  };
+  note.scrollIntoView({ block: "end" });
 }
 
 $("#logout").onclick = () => { location.href = "/logout"; };

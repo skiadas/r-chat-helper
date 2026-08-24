@@ -47,18 +47,25 @@ type UsageEvent struct {
 	CostMicros      int64
 }
 
-// Session is a student chat session, managed by the control plane (not by a
-// separate agent runtime). Sessions begin as drafts (committed=false) and only
+// Sessions begin as drafts (committed=false) and only
 // become visible in the sidebar once committed. Soft-deleted sessions keep
-// their row for admin review but never appear to students.
+// their row for admin review but never appear to students. Summary, when set,
+// is carried into the model-facing context of a later session started from
+// this one; HasSummary marks a session created from a summary (it may never
+// generate another, so a carried summary can only be composed once).
+// LastPromptTokens is the model context size of the most recently completed
+// turn, the basis of the session size cap.
 type Session struct {
-	ID        string
-	StudentID string
-	Title     string
-	Committed bool
-	Deleted   bool
-	CreatedAt int64
-	UpdatedAt int64
+	ID               string
+	StudentID        string
+	Title            string
+	Committed        bool
+	Deleted          bool
+	CreatedAt        int64
+	UpdatedAt        int64
+	Summary          string
+	HasSummary       bool
+	LastPromptTokens int64
 }
 
 // Message is a single persisted chat turn. Context, when set, is the
@@ -195,6 +202,7 @@ type AdminSession struct {
 func (a *App) ListAllSessions(ctx context.Context) ([]AdminSession, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT s.id, s.student_id, s.title, s.committed, COALESCE(s.deleted_at,0), s.created_at, s.updated_at,
+		       COALESCE(s.summary,''), s.has_summary, s.last_prompt_tokens,
 		       st.email, st.name
 		FROM sessions s JOIN students st ON st.id = s.student_id
 		WHERE st.id NOT LIKE 'scratch:%'
@@ -206,13 +214,15 @@ func (a *App) ListAllSessions(ctx context.Context) ([]AdminSession, error) {
 	var out []AdminSession
 	for rows.Next() {
 		as := AdminSession{}
-		var committed, deleted int
+		var committed, deleted, hasSummary int
 		if err := rows.Scan(&as.ID, &as.StudentID, &as.Title, &committed, &deleted, &as.CreatedAt, &as.UpdatedAt,
+			&as.Summary, &hasSummary, &as.LastPromptTokens,
 			&as.StudentEmail, &as.StudentName); err != nil {
 			return nil, err
 		}
 		as.Committed = committed != 0
 		as.Deleted = deleted != 0
+		as.HasSummary = hasSummary != 0
 		out = append(out, as)
 	}
 	return out, rows.Err()
@@ -255,11 +265,36 @@ func (a *App) CreateSession(ctx context.Context, studentID, title string) (*Sess
 	return &Session{ID: id, StudentID: studentID, Title: title, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+// CreateSessionWithSummary creates a session whose model-facing context starts
+// from a carry-over summary of another session. HasSummary is set so the
+// session can never in turn be summarized (a summary composes at most once).
+func (a *App) CreateSessionWithSummary(ctx context.Context, studentID, title, summary string) (*Session, error) {
+	id := newID()
+	now := time.Now().Unix()
+	_, err := a.db.ExecContext(ctx,
+		`INSERT INTO sessions(id, student_id, title, committed, summary, has_summary, created_at, updated_at)
+		 VALUES(?,?,?,0,?,1,?,?)`,
+		id, studentID, title, summary, now, now)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{ID: id, StudentID: studentID, Title: title, Summary: summary, HasSummary: true, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+// SetSessionPromptTokens records the model context size (in tokens) of the
+// session's most recently completed turn; the session size cap compares
+// against it before the next turn is accepted.
+func (a *App) SetSessionPromptTokens(ctx context.Context, sessionID string, tokens int64) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE sessions SET last_prompt_tokens=? WHERE id=?`, tokens, sessionID)
+	return err
+}
+
 // scanSession scans a session row in the canonical column order.
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	s := &Session{}
-	var committed, deleted int
-	err := row.Scan(&s.ID, &s.StudentID, &s.Title, &committed, &deleted, &s.CreatedAt, &s.UpdatedAt)
+	var committed, deleted, hasSummary int
+	err := row.Scan(&s.ID, &s.StudentID, &s.Title, &committed, &deleted, &s.CreatedAt, &s.UpdatedAt,
+		&s.Summary, &hasSummary, &s.LastPromptTokens)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -268,19 +303,22 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	}
 	s.Committed = committed != 0
 	s.Deleted = deleted != 0
+	s.HasSummary = hasSummary != 0
 	return s, nil
 }
 
 func (a *App) Session(ctx context.Context, id string) (*Session, error) {
 	return scanSession(a.db.QueryRowContext(ctx,
-		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions WHERE id=?`, id))
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at,
+		        COALESCE(summary,''), has_summary, last_prompt_tokens FROM sessions WHERE id=?`, id))
 }
 
 // ListSessions returns the student's committed, non-deleted sessions, most
 // recently active first. Drafts and soft-deleted sessions are excluded.
 func (a *App) ListSessions(ctx context.Context, studentID string) ([]Session, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at,
+		        COALESCE(summary,''), has_summary, last_prompt_tokens FROM sessions
 		 WHERE student_id=? AND committed=1 AND deleted_at IS NULL ORDER BY updated_at DESC`, studentID)
 	if err != nil {
 		return nil, err
@@ -288,13 +326,10 @@ func (a *App) ListSessions(ctx context.Context, studentID string) ([]Session, er
 	defer rows.Close()
 	var out []Session
 	for rows.Next() {
-		s := &Session{}
-		var committed, deleted int
-		if err := rows.Scan(&s.ID, &s.StudentID, &s.Title, &committed, &deleted, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		s, err := scanSession(rows)
+		if err != nil {
 			return nil, err
 		}
-		s.Committed = committed != 0
-		s.Deleted = deleted != 0
 		out = append(out, *s)
 	}
 	return out, rows.Err()
@@ -304,7 +339,8 @@ func (a *App) ListSessions(ctx context.Context, studentID string) ([]Session, er
 // draft or committed, or nil if the student has none.
 func (a *App) LatestSession(ctx context.Context, studentID string) (*Session, error) {
 	return scanSession(a.db.QueryRowContext(ctx,
-		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at FROM sessions
+		`SELECT id, student_id, title, committed, COALESCE(deleted_at,0), created_at, updated_at,
+		        COALESCE(summary,''), has_summary, last_prompt_tokens FROM sessions
 		 WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1`, studentID))
 }
 

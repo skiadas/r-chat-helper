@@ -87,7 +87,7 @@ func TestClientInjectsConfiguredKeyAndForcesModel(t *testing.T) {
 	cfg.WebFetchEnabled = true
 	c := newGoClient(cfg)
 
-	tr, err := c.send(t.Context(), nil)
+	tr, err := c.send(t.Context(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestToOpenAIMessagesUsesContextWhenSet(t *testing.T) {
 		{Role: "user", Text: "hi"},
 		{Role: "assistant", Text: "answer (display only)", Context: "answer\n\n[fetched url]\nraw fetched content"},
 	}
-	out := c.toOpenAIMessages(msgs, nil)
+	out := c.toOpenAIMessages(msgs, nil, "")
 	if len(out) != 3 { // system + user + assistant
 		t.Fatalf("got %d messages, want 3", len(out))
 	}
@@ -129,6 +129,171 @@ func TestToOpenAIMessagesUsesContextWhenSet(t *testing.T) {
 	}
 	if strings.Contains(out[2].Content, "display only") {
 		t.Fatalf("assistant Context leaked the display-only text: %q", out[2].Content)
+	}
+}
+
+func TestToOpenAIMessagesPrependsCarriedSummary(t *testing.T) {
+	c := newGoClient(DefaultConfig())
+	out := c.toOpenAIMessages([]Message{{Role: "user", Text: "hi"}}, nil, "student was fitting lm()")
+	if len(out) != 3 {
+		t.Fatalf("got %d messages, want 3 (system, summary, user)", len(out))
+	}
+	if out[0].Role != "system" || !strings.HasPrefix(out[0].Content, "You are a friendly R programming tutor") {
+		t.Fatalf("first message should be the system prompt: %+v", out[0])
+	}
+	if out[1].Role != "system" || !strings.Contains(out[1].Content, "student was fitting lm()") {
+		t.Fatalf("summary block missing: %+v", out[1])
+	}
+	// An empty summary must not inject anything.
+	plain := c.toOpenAIMessages([]Message{{Role: "user", Text: "hi"}}, nil, "")
+	if len(plain) != 2 {
+		t.Fatalf("without summary got %d messages, want 2", len(plain))
+	}
+}
+
+// newTopicUpstream returns a suggest_new_topic signal on the first request and
+// a final answer on the second, recording whether the signal was ever executed
+// as a tool result.
+type newTopicUpstream struct {
+	requests int
+}
+
+func (f *newTopicUpstream) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests++
+		if f.requests == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []map[string]any{{
+							"id":   "call_1",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "suggest_new_topic",
+								"arguments": `{}`,
+							},
+						}},
+					},
+				}},
+				"usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 1},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": "sure, that is a new topic"},
+			}},
+			"usage": map[string]any{"prompt_tokens": 7, "completion_tokens": 6},
+		})
+	})
+}
+
+func TestSendRecordsNewTopicSignalWithoutExecutingIt(t *testing.T) {
+	f := &newTopicUpstream{}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Upstream = srv.URL
+	cfg.ProviderKey = "k"
+	cfg.WebFetchEnabled = false
+	c := newGoClient(cfg)
+
+	tr, err := c.send(t.Context(), []Message{{Role: "user", Text: "now about ggplot2"}, {Role: "assistant", Text: "prev answer"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tr.NewTopic {
+		t.Fatalf("NewTopic not recorded: %+v", tr)
+	}
+	if tr.Text != "sure, that is a new topic" {
+		t.Fatalf("final text = %q", tr.Text)
+	}
+	// The signal must never surface as an executed tool result.
+	if len(tr.Tools) != 0 {
+		t.Fatalf("signal leaked into tool results: %+v", tr.Tools)
+	}
+	if tr.Usage.Input != 12 || tr.Usage.Output != 7 {
+		t.Fatalf("usage not accumulated across turns: %+v", tr.Usage)
+	}
+}
+
+func TestSummaryForReturnsTextAndUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if req.MaxTokens == nil || *req.MaxTokens > 512 {
+			t.Fatalf("summary max_tokens = %v, want <= 512", req.MaxTokens)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": "student fitting lm() with singular fit errors"},
+			}},
+			"usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 9},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Upstream = srv.URL
+	cfg.ProviderKey = "k"
+	c := newGoClient(cfg)
+
+	tr, err := c.summaryFor(t.Context(), []Message{{Role: "user", Text: "lm(y~x)"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Text != "student fitting lm() with singular fit errors" {
+		t.Fatalf("summary text = %q", tr.Text)
+	}
+	if tr.Usage.Input != 40 || tr.Usage.Output != 9 {
+		t.Fatalf("summary usage = %+v", tr.Usage)
+	}
+	if len(tr.Tools) != 0 {
+		t.Fatalf("summary offered tools: %+v", tr.Tools)
+	}
+}
+
+func TestSendNoWebFetchStillOffersSuggestNewTopic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatReq
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var names []string
+		for _, td := range req.Tools {
+			names = append(names, td.Function.Name)
+		}
+		found := false
+		for _, n := range names {
+			if n == "suggest_new_topic" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tools = %v, want suggest_new_topic", names)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := DefaultConfig()
+	cfg.Upstream = srv.URL
+	cfg.ProviderKey = "k"
+	cfg.WebFetchEnabled = false
+	c := newGoClient(cfg)
+	if _, err := c.send(t.Context(), nil, ""); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -81,6 +81,62 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestCreateSessionWithSummaryOnceOnly(t *testing.T) {
+	app := newTestApp(t)
+	ctx := context.Background()
+	if err := app.AddStudent(ctx, "alice", "alice@college.edu", "Alice", 0); err != nil {
+		t.Fatal(err)
+	}
+	ses, err := app.CreateSessionWithSummary(ctx, "alice", "", "carried summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ses.HasSummary || ses.Summary != "carried summary" {
+		t.Fatalf("summarized session = %+v", ses)
+	}
+	got, err := app.Session(ctx, ses.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || !got.HasSummary || got.Summary != "carried summary" {
+		t.Fatalf("roundtrip session = %+v", got)
+	}
+	// Plain creation must NOT set the flag.
+	plain, err := app.CreateSession(ctx, "alice", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = app.Session(ctx, plain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HasSummary || got.Summary != "" || got.LastPromptTokens != 0 {
+		t.Fatalf("plain session = %+v", got)
+	}
+}
+
+func TestSetSessionPromptTokens(t *testing.T) {
+	app := newTestApp(t)
+	ctx := context.Background()
+	if err := app.AddStudent(ctx, "bob", "bob@college.edu", "Bob", 0); err != nil {
+		t.Fatal(err)
+	}
+	ses, err := app.CreateSession(ctx, "bob", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SetSessionPromptTokens(ctx, ses.ID, 88_000); err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.Session(ctx, ses.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastPromptTokens != 88_000 {
+		t.Fatalf("last prompt tokens = %d, want 88000", got.LastPromptTokens)
+	}
+}
+
 func TestLatestSessionPrefersMostRecentActivity(t *testing.T) {
 	app := newTestApp(t)
 	ctx := context.Background()

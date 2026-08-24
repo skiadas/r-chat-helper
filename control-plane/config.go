@@ -24,6 +24,12 @@ type Config struct {
 	WebFetchMaxText   int64
 	WebFetchAllowlist []string // empty = any URL (best-effort)
 
+	// SessionMaxTokens is the size cap (in tokens) of a session's model
+	// context, measured as the last completed turn's prompt tokens. A send
+	// that would push a session at or beyond the cap is refused and the
+	// student is offered a fresh session. 0 disables the cap.
+	SessionMaxTokens int64
+
 	// OIDC (authentication via the external SSO).
 	OIDCIssuer       string
 	OIDCClientID     string
@@ -68,6 +74,8 @@ func DefaultConfig() *Config {
 		WebFetchMaxText:   32 << 10,
 		WebFetchAllowlist: splitList(envOr("RC_WEBFETCH_ALLOW", "")),
 
+		SessionMaxTokens: envInt64("RC_SESSION_MAX_TOKENS", 120_000),
+
 		OIDCIssuer:       envOr("RC_OIDC_ISSUER", "https://sso.harisskiadas.com"),
 		OIDCClientID:     envOr("RC_OIDC_CLIENT_ID", "r-chat-helper"),
 		OIDCClientSecret: envOr("RC_OIDC_CLIENT_SECRET", ""),
@@ -98,6 +106,18 @@ func envBool(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+func envInt64(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // splitList splits a ";" or "," separated list, lowercased, empties removed.

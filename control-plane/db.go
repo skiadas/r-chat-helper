@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS model_rates (
 	if _, err := db.Exec("ALTER TABLE messages ADD COLUMN context TEXT"); err != nil && !isDupColumn(err) {
 		return err
 	}
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN summary TEXT"); err != nil && !isDupColumn(err) {
+		return err
+	}
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN has_summary INTEGER NOT NULL DEFAULT 0"); err != nil && !isDupColumn(err) {
+		return err
+	}
+	if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN last_prompt_tokens INTEGER NOT NULL DEFAULT 0"); err != nil && !isDupColumn(err) {
+		return err
+	}
 	return nil
 }
 

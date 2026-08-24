@@ -1,13 +1,20 @@
 export const $ = (s, el=document) => el.querySelector(s);
 
 // api wraps fetch with JSON headers and throws on non-2xx with the server's
-// error message. The session cookie is sent automatically (same-origin).
+// error message. The session cookie is sent automatically (same-origin). The
+// thrown Error carries the server's machine-readable "code" (e.g.
+// "session_full") so callers can branch on it.
 export const api = {
   async req(path, opts={}) {
     opts.headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
     const r = await fetch(path, opts);
     const data = await r.json().catch(()=>({}));
-    if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+    if (!r.ok) {
+      const err = new Error(data.error || ("HTTP " + r.status));
+      err.code = data.code;
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 };

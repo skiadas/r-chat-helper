@@ -56,11 +56,14 @@ type toolResult struct {
 }
 
 // turn is one model invocation result: the assistant text and any tool calls
-// that were made and executed.
+// that were made and executed. NewTopic is set when the model signalled that
+// the current prompt starts a topic unrelated to the conversation; it is a
+// suggestion, never an action, so the student decides whether to start fresh.
 type turn struct {
-	Text  string
-	Tools []toolResult
-	Usage usage
+	Text     string
+	Tools    []toolResult
+	Usage    usage
+	NewTopic bool
 }
 
 // chatReq mirrors the OpenAI-compatible request fields we send.
@@ -129,12 +132,22 @@ type chatResp struct {
 	} `json:"error"`
 }
 
-// tools returns the tool definitions offered to the model.
+// tools returns the tool definitions offered to the model. suggest_new_topic
+// is a signalling tool: it is never executed, and the client's send loop only
+// records that it was requested.
 func (c *goClient) tools() []toolDef {
+	tools := []toolDef{{
+		Type: "function",
+		Function: fnDef{
+			Name:        "suggest_new_topic",
+			Description: "Call this when the student's latest question starts a genuinely new topic unrelated to the current conversation. Do not call it for follow-up questions, clarifications, or continuations of the current topic.",
+			Parameters:  map[string]any{"type": "object"},
+		},
+	}}
 	if c.webfetch == nil {
-		return nil
+		return tools
 	}
-	return []toolDef{{
+	return append(tools, toolDef{
 		Type: "function",
 		Function: fnDef{
 			Name:        "webfetch",
@@ -147,15 +160,20 @@ func (c *goClient) tools() []toolDef {
 				"required": []string{"url"},
 			},
 		},
-	}}
+	})
 }
 
 // toOpenAIMessages converts persisted chat messages plus any accumulated tool
 // turns into the OpenAI message sequence. A message's Context field, when set,
-// is what the model sees (full tool output); its Text stays for the UI.
-func (c *goClient) toOpenAIMessages(msgs []Message, tools []toolResult) []chatMessage {
-	out := make([]chatMessage, 0, len(msgs)+len(tools)*2)
+// is what the model sees (full tool output); its Text stays for the UI. A
+// non-empty summary is injected as a synthetic system block so a session
+// started from a summarized one still has its thread in context.
+func (c *goClient) toOpenAIMessages(msgs []Message, tools []toolResult, summary string) []chatMessage {
+	out := make([]chatMessage, 0, len(msgs)+len(tools)*2+2)
 	out = append(out, chatMessage{Role: "system", Content: systemPrompt})
+	if summary != "" {
+		out = append(out, chatMessage{Role: "system", Content: "[Prior context] " + summary})
+	}
 	for _, m := range msgs {
 		content := m.Text
 		if m.Context != "" {
@@ -178,16 +196,20 @@ The course runs R 4.5.3 with the hanoverbase package, which loads the tidyverse,
 
 You never run code. If you want to verify how a current package works or fetch live documentation, use the webfetch tool. Otherwise answer from your knowledge; if something is uncertain, say so in a short sentence.
 
+If the student's latest question clearly starts a new topic unrelated to the current conversation, call the suggest_new_topic function; otherwise continue in the current conversation.
+
 Keep answers short and focused. Answer the specific question asked; use at most one minimal code example; point to documentation rather than quoting it at length. Do not add alternative approaches, extra examples, caveats, or "other variants" sections unless the student explicitly asks. If extra depth would be useful, offer it in a single closing sentence instead.`
 
 // send runs one full turn: it may loop to execute webfetch calls the model
-// requests, bounded by maxTools.
-func (c *goClient) send(ctx context.Context, msgs []Message) (*turn, error) {
+// requests, bounded by maxTools. suggest_new_topic is a signal, never
+// executed; the turn records it as NewTopic.
+func (c *goClient) send(ctx context.Context, msgs []Message, summary string) (*turn, error) {
 	var tools []toolResult
 	var total usage
+	var newTopic bool
 
 	for i := 0; i < c.maxTools; i++ {
-		req, err := c.buildRequest(ctx, msgs, tools)
+		req, err := c.buildRequest(ctx, msgs, tools, summary)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +221,7 @@ func (c *goClient) send(ctx context.Context, msgs []Message) (*turn, error) {
 
 		choice := firstChoice(resp)
 		if choice == nil {
-			return &turn{Text: "", Usage: total}, nil
+			return &turn{Text: "", Usage: total, NewTopic: newTopic}, nil
 		}
 
 		var text string
@@ -208,12 +230,15 @@ func (c *goClient) send(ctx context.Context, msgs []Message) (*turn, error) {
 		}
 
 		if len(choice.Message.ToolCalls) == 0 {
-			return &turn{Text: text, Tools: tools, Usage: total}, nil
+			return &turn{Text: text, Tools: tools, Usage: total, NewTopic: newTopic}, nil
 		}
 
-		// Execute each requested tool (only webfetch is offered).
+		// Execute each requested tool (webfetch is executed; suggest_new_topic
+		// is only recorded).
 		for _, tc := range choice.Message.ToolCalls {
 			switch tc.Function.Name {
+			case "suggest_new_topic":
+				newTopic = true
 			case "webfetch":
 				var args struct {
 					URL string `json:"url"`
@@ -231,7 +256,7 @@ func (c *goClient) send(ctx context.Context, msgs []Message) (*turn, error) {
 		// Continue the loop so the model can use the fetched content.
 	}
 
-	return &turn{Text: "Stopped: too many tool calls.", Tools: tools, Usage: total}, nil
+	return &turn{Text: "Stopped: too many tool calls.", Tools: tools, Usage: total, NewTopic: newTopic}, nil
 }
 
 // titleFor asks the model for a short conversation title from the given
@@ -246,6 +271,34 @@ func (c *goClient) titleFor(ctx context.Context, msgs []Message) (*turn, error) 
 		reqMsgs = append(reqMsgs, chatMessage{Role: m.Role, Content: truncate([]byte(m.Text), 500)})
 	}
 	reqMsgs = append(reqMsgs, chatMessage{Role: "user", Content: "Give this conversation a short title under 50 characters that captures its topic. Reply with only the title."})
+	resp, err := c.post(ctx, chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
+	if err != nil {
+		return nil, err
+	}
+	choice := firstChoice(resp)
+	text := ""
+	if choice != nil && choice.Message.Content != nil {
+		text = strings.TrimSpace(*choice.Message.Content)
+	}
+	return &turn{Text: text, Usage: usageFromResp(resp)}, nil
+}
+
+// summaryFor asks the model for a compact carry-forward summary of a
+// conversation, used to seed a fresh session started from this one. It uses a
+// small max_tokens cap and no tools so it stays cheap; the returned usage is
+// priced like any other interaction. On failure it returns an error and the
+// caller falls back to a cold start. The summary is best-effort: the model is
+// told to preserve exact artifacts and to mark anything uncertain rather than
+// guess, so the tutor that reads it later asks the student to re-paste rather
+// than over-claim.
+func (c *goClient) summaryFor(ctx context.Context, msgs []Message) (*turn, error) {
+	maxTokens := 256
+	reqMsgs := make([]chatMessage, 0, len(msgs)+2)
+	reqMsgs = append(reqMsgs, chatMessage{Role: "system", Content: "You write concise carry-forward summaries of R tutoring conversations so the tutor can continue helping without the full history. Preserve exact artifacts: variable names, code snippets, error messages, packages and data sets, and any unresolved threads. The summary is best-effort: if a detail is uncertain, say so instead of guessing."})
+	for _, m := range msgs {
+		reqMsgs = append(reqMsgs, chatMessage{Role: m.Role, Content: truncate([]byte(m.Text), 2000)})
+	}
+	reqMsgs = append(reqMsgs, chatMessage{Role: "user", Content: "Write a summary of this R tutoring conversation for a continuing session. Keep it under roughly 200 words. Preserve exact code, variable names, error messages, packages, and data sets, and note any unanswered questions. Mark anything uncertain as uncertain rather than guessing."})
 	resp, err := c.post(ctx, chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
 	if err != nil {
 		return nil, err
@@ -274,14 +327,12 @@ func (c *goClient) post(ctx context.Context, body chatReq) (*chatResp, error) {
 	return c.doOnce(ctx, req)
 }
 
-func (c *goClient) buildRequest(ctx context.Context, msgs []Message, tools []toolResult) (*http.Request, error) {
+func (c *goClient) buildRequest(ctx context.Context, msgs []Message, tools []toolResult, summary string) (*http.Request, error) {
 	body := chatReq{
 		Model:    c.model,
-		Messages: c.toOpenAIMessages(msgs, tools),
+		Messages: c.toOpenAIMessages(msgs, tools, summary),
+		Tools:    c.tools(),
 		Stream:   false,
-	}
-	if c.webfetch != nil {
-		body.Tools = c.tools()
 	}
 	b, err := json.Marshal(body)
 	if err != nil {

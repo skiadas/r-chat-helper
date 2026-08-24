@@ -32,6 +32,13 @@ README; for invariants, read below.
   cost engine, upstream client, embedded chat UI, admin CLI).
 - Session lifecycle (draft → commit on two assistant turns → background title)
   lives in `session_lifecycle.go`; treat it as a behavioral contract.
+- Session growth is part of that contract: a send is refused with
+  `409 session_full` once the last turn's prompt tokens reach
+  `RC_SESSION_MAX_TOKENS` (default 120k); the model may signal
+  `suggest_new_topic` (a suggestion only, surfaced to the UI — never an
+  action); `from-summary`/`from-topic` seed fresh sessions, and a session
+  created from a summary (`has_summary=1`) can never generate another
+  (once-only).
 
 ## Conventions
 
