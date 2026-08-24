@@ -231,7 +231,11 @@ func (a *App) EnsureScratchStudent(ctx context.Context, adminEmail string) (*Stu
 	if s != nil {
 		return s, nil
 	}
-	if err := a.AddStudent(ctx, id, adminEmail, "Instructor (scratch)", 0); err != nil {
+	// The scratch identity keeps a small fixed budget so the instructor's
+	// test flow exercises real cap enforcement; it is editable in the admin
+	// view like any other student row.
+	const scratchBudgetMicros = 1_000_000 // $1.00
+	if err := a.AddStudent(ctx, id, adminEmail, "Instructor (scratch)", scratchBudgetMicros); err != nil {
 		return nil, err
 	}
 	return a.StudentByID(ctx, id)

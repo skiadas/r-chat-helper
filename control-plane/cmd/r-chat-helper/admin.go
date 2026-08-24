@@ -47,14 +47,20 @@ func runAdmin(args []string) error {
 func cmdAddStudent(ctx context.Context, app *cp.App, args []string) error {
 	fs := flag.NewFlagSet("add-student", flag.ContinueOnError)
 	email := fs.String("email", "", "student email (the SSO identity)")
-	id := fs.String("id", "", "student id")
+	id := fs.String("id", "", "student id (defaults to the email)")
 	name := fs.String("name", "", "display name")
-	budget := fs.Float64("budget", 0, "soft budget in USD (0 = unlimited)")
+	budget := fs.Float64("budget", 0, "soft budget in USD (required, > 0)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *email == "" || *id == "" || *name == "" {
-		return fmt.Errorf("add-student requires -email, -id, and -name")
+	if *email == "" || *name == "" {
+		return fmt.Errorf("add-student requires -email and -name")
+	}
+	if *id == "" {
+		*id = *email
+	}
+	if *budget <= 0 {
+		return fmt.Errorf("add-student requires -budget greater than zero")
 	}
 	if err := app.AddStudent(ctx, *id, *email, *name, int64(*budget*1e6)); err != nil {
 		return err
@@ -87,12 +93,15 @@ func cmdSetActive(ctx context.Context, app *cp.App, args []string) error {
 func cmdSetBudget(ctx context.Context, app *cp.App, args []string) error {
 	fs := flag.NewFlagSet("set-budget", flag.ContinueOnError)
 	student := fs.String("student", "", "student id")
-	budget := fs.Float64("budget", 0, "soft budget in USD (0 = unlimited)")
+	budget := fs.Float64("budget", 0, "soft budget in USD (required, > 0)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *student == "" {
 		return fmt.Errorf("set-budget requires -student and -budget")
+	}
+	if *budget <= 0 {
+		return fmt.Errorf("set-budget requires -budget greater than zero")
 	}
 	s, err := app.StudentByID(ctx, *student)
 	if err != nil || s == nil {

@@ -19,14 +19,10 @@ func (a *App) requireAdmin(next http.Handler) http.Handler {
 }
 
 func (a *App) handleAdminListStudents(w http.ResponseWriter, r *http.Request) {
+	c := claimsOf(r)
 	students, err := a.ListStudentsWithSpend(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to list students")
-		return
-	}
-	scratchMicros, scratchCount, err := a.ScratchSummary(r.Context())
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "failed to load usage")
 		return
 	}
 	out := make([]map[string]any, 0, len(students)+1)
@@ -41,11 +37,29 @@ func (a *App) handleAdminListStudents(w http.ResponseWriter, r *http.Request) {
 			"remaining_usd": float64(sw.BudgetMicros-sw.SpentMicros) / 1e6,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"students":      out,
-		"scratch_count": scratchCount,
-		"scratch_spent": float64(scratchMicros) / 1e6,
+	// The current admin's scratch test identity appears as a tagged row so its
+	// budget is visible and editable like any student's.
+	scratch, err := a.EnsureScratchStudent(r.Context(), c.Email)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load test identity")
+		return
+	}
+	spent, err := a.SpendByStudent(r.Context(), scratch.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	out = append(out, map[string]any{
+		"id":            scratch.ID,
+		"email":         scratch.Email,
+		"name":          scratch.Name,
+		"active":        scratch.Active,
+		"test":          true,
+		"budget_usd":    float64(scratch.BudgetMicros) / 1e6,
+		"spent_usd":     float64(spent) / 1e6,
+		"remaining_usd": float64(scratch.BudgetMicros-spent) / 1e6,
 	})
+	writeJSON(w, http.StatusOK, map[string]any{"students": out})
 }
 
 func (a *App) handleAdminCreateStudent(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +71,10 @@ func (a *App) handleAdminCreateStudent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readJSON(r, &req); err != nil || req.Email == "" || req.Name == "" {
 		writeErr(w, http.StatusBadRequest, "email and name are required")
+		return
+	}
+	if req.BudgetUsd <= 0 {
+		writeErr(w, http.StatusBadRequest, "a budget greater than zero is required")
 		return
 	}
 	// Students are tracked by email; the internal id defaults to it so the
@@ -101,6 +119,10 @@ func (a *App) handleAdminUpdateStudent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.BudgetUsd != nil {
+		if *req.BudgetUsd <= 0 {
+			writeErr(w, http.StatusBadRequest, "a budget greater than zero is required")
+			return
+		}
 		if err := a.SetBudget(r.Context(), sid, micros(*req.BudgetUsd)); err != nil {
 			writeErr(w, http.StatusInternalServerError, "failed to update budget")
 			return

@@ -105,13 +105,13 @@ func TestAdminCreateStudent(t *testing.T) {
 	}
 }
 
-// TestAdminCreateStudentDefaultsIDToEmail covers adding a student with only
-// email+name (the admin form): the internal id falls back to the email.
+// TestAdminCreateStudentDefaultsIDToEmail covers adding a student with email,
+// name and budget (the admin form): the internal id falls back to the email.
 func TestAdminCreateStudentDefaultsIDToEmail(t *testing.T) {
 	app := newAdminApp(t)
 	cookie := adminToken(t, app)
 
-	body := `{"email":"carol@college.edu","name":"Carol"}`
+	body := `{"email":"carol@college.edu","name":"Carol","budget_usd":1.5}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/students", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
@@ -127,6 +127,24 @@ func TestAdminCreateStudentDefaultsIDToEmail(t *testing.T) {
 	}
 	if s.ID != "carol@college.edu" {
 		t.Fatalf("id = %q, want default of email", s.ID)
+	}
+}
+
+// TestAdminCreateStudentRejectsZeroBudget verifies the required-budget rule:
+// a student cannot be added without a positive budget.
+func TestAdminCreateStudentRejectsZeroBudget(t *testing.T) {
+	app := newAdminApp(t)
+	cookie := adminToken(t, app)
+
+	body := `{"email":"no-budget@college.edu","name":"Nobody","budget_usd":0}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/students", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminCreateStudent))).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("zero-budget create = %d, want 400", rec.Code)
 	}
 }
 
