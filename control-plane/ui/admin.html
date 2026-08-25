@@ -11,7 +11,7 @@
     <header>
       <span class="name" id="meName"></span>
       <span class="meta" id="meMeta"></span>
-      <a class="signin-btn" href="/api/admin/scratch-login">Test the student experience</a>
+      <a class="signin-btn" href="/test-student">Test the student experience</a>
       <button class="secondary" id="logout">Log out</button>
     </header>
     <div class="tabbar">
@@ -218,6 +218,7 @@ $("#addStudent").onsubmit = async (e) => {
 (async () => {
   try {
     const me = await api.req("/api/me");
+    window.__rcAuthed = true;
     if (me.role !== "admin") { location.href = "/"; return; }
     $("#meName").textContent = me.email;
   } catch (e) {

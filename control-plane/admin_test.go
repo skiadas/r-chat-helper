@@ -241,7 +241,7 @@ func TestScratchLoginSetsMarker(t *testing.T) {
 	app := newAdminApp(t)
 	cookie := adminToken(t, app)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-login", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test-student", nil)
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminScratchLogin))).ServeHTTP(rec, req)
@@ -306,7 +306,7 @@ func TestScratchReturnClearsMarker(t *testing.T) {
 	cookie := adminToken(t, app)
 	marker := modeCookie(t, markAdmin(t, app, cookie))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-return", nil)
+	req := httptest.NewRequest(http.MethodGet, "/back-to-admin", nil)
 	req.AddCookie(cookie)
 	req.AddCookie(marker)
 	rec := httptest.NewRecorder()
@@ -350,7 +350,7 @@ func TestScratchReturnClearsMarkerForStudent(t *testing.T) {
 		t.Fatal("student login set no session cookie")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-return", nil)
+	req := httptest.NewRequest(http.MethodGet, "/back-to-admin", nil)
 	req.AddCookie(studentCookie)
 	w := httptest.NewRecorder()
 	app.authenticate(http.HandlerFunc(app.handleAdminScratchReturn)).ServeHTTP(w, req)
@@ -372,7 +372,7 @@ func TestScratchReturnClearsMarkerForStudent(t *testing.T) {
 // can read the rc_mode cookie it set.
 func markAdmin(t *testing.T, app *App, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/scratch-login", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test-student", nil)
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	app.authenticate(app.requireAdmin(http.HandlerFunc(app.handleAdminScratchLogin))).ServeHTTP(rec, req)

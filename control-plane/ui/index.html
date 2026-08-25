@@ -11,6 +11,7 @@
     <div class="card">
       <h1>R Tutor</h1>
       <p>Class AI R tutor. Sign in with your college email to continue.</p>
+      <p id="loginNote" class="notice" style="display:none">Your session expired — sign in again.</p>
       <a class="signin-btn" href="/auth/login">Sign in</a>
     </div>
   </div>
@@ -19,7 +20,7 @@
     <header>
       <span class="name" id="meName"></span>
       <span class="meta" id="meMeta"></span>
-      <a class="signin-btn" id="backToAdmin" href="/api/admin/scratch-return" style="display:none">Back to admin</a>
+      <a class="signin-btn" id="backToAdmin" href="/back-to-admin" style="display:none">Back to admin</a>
       <button class="secondary" id="logout">Log out</button>
     </header>
     <div id="restore"></div>
@@ -42,7 +43,7 @@
   </div>
 
 <script type="module">
-import { $, api, fmtUsd, esc, fillMessages } from "/js/api.js";
+import { $, api, fmtUsd, esc, fillMessages, draft, expired } from "/js/api.js";
 
 let currentSession = null;
 let scratch = false;
@@ -168,10 +169,12 @@ async function doSend(sid, text) {
   $("#messages").appendChild(thinking);
   $("#messages").scrollTop = $("#messages").scrollHeight;
 
+  draft.save(text);
   try {
     const r = await api.req(`/api/me/sessions/${sid}/messages`, {
       method: "POST", body: JSON.stringify({ text })
     });
+    draft.clearIf(text);
     thinking.innerHTML = `<div class="role">assistant</div><div class="bubble">${r.html || esc(r.assistant)}</div>
       <div class="cost">this turn: ${fmtUsd(r.cost_usd)} · total: ${fmtUsd(r.spent_usd)}</div>`;
     refreshMe();
@@ -183,6 +186,8 @@ async function doSend(sid, text) {
       // The conversation hit its size cap: park the typed question and offer
       // a continuation so nothing is lost.
       offerSessionFull(sid, text, !!e.data.summary_available);
+    } else if (e.code === "auth_required") {
+      draft.clearIf(text); // parked by the interceptor already
     } else {
       const errEl = document.createElement("div");
       errEl.className = "msg assistant";
@@ -246,9 +251,27 @@ $("#newSession").onclick = async () => {
 $("#send").onclick = send;
 $("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
+// scheduleExpiry arms the session check for around the token's deadline. While
+// active, the server refreshes the token and /api/me reports a new deadline,
+// so the timer just reschedules; after genuine idle it finds the token expired
+// and the api interceptor hands the user to the login card.
+function scheduleExpiry(expiresAtUnix) {
+  if (!expiresAtUnix) return;
+  const delay = Math.max(expiresAtUnix * 1000 - Date.now(), 2000);
+  setTimeout(async () => {
+    try {
+      const me = await api.req("/api/me");
+      if (me && me.expires_at) scheduleExpiry(me.expires_at);
+    } catch (e) {
+      if (e.code !== "auth_required") scheduleExpiry(Date.now() / 1000 + 60); // transient: retry shortly
+    }
+  }, delay);
+}
+
 (async () => {
   try {
     const me = await api.req("/api/me");
+    window.__rcAuthed = true;
     if (me.role === "admin") {
       // Instructors get a dedicated page, not the student shell.
       location.href = "/admin.html";
@@ -271,8 +294,16 @@ $("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shif
       banner.textContent = "Restored your last session. Click “New conversation” to start a new topic.";
       banner.style.display = "block";
     }
+    // Bring back a draft that was parked when the session lapsed.
+    const parked = draft.take();
+    if (parked) {
+      $("#prompt").value = parked;
+      $("#prompt").focus();
+    }
+    scheduleExpiry(me.expires_at);
   } catch (e) {
     $("#login").classList.add("active");
+    if (expired.once()) $("#loginNote").style.display = "block";
   }
 })();
 </script>

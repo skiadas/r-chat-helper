@@ -23,7 +23,30 @@ type claims struct {
 	jwt.RegisteredClaims
 }
 
+// expUnix returns the token expiry as unix seconds (0 when unset); the UI uses
+// it to schedule its session check.
+func expUnix(c *claims) int64 {
+	if c != nil && c.ExpiresAt != nil {
+		return c.ExpiresAt.Time.Unix()
+	}
+	return 0
+}
+
 var errNoAuth = errors.New("missing or invalid credentials")
+
+// Error codes the UI branches on; the interceptor treats auth_required as
+// "session over, sign in again".
+const (
+	errCodeAuth     = "auth_required"
+	errCodeDisabled = "account_disabled"
+	errCodeAdmin    = "admin_required"
+
+	// renewThreshold is how close a token must be to expiry before an
+	// authenticated request refreshes it. Renewal means a busy session never
+	// hits the wall; each replacement token is minted fresh, so nothing ever
+	// lives longer than sessionTTL.
+	renewThreshold = 30 * time.Minute
+)
 
 // issueToken mints a clean identity token. The token never carries mode
 // state: an instructor's test session is signaled by the rc_mode cookie, not
@@ -75,28 +98,52 @@ func (a *App) claimsFromRequest(r *http.Request) (*claims, error) {
 	return nil, errNoAuth
 }
 
-// authenticate verifies the session token, resolves the effective identity
-// (the token plus any rc_mode marker), and for student-role identities loads
-// the student record into the request context.
+// authenticate verifies the session token, refreshes it near expiry, resolves
+// the effective identity (the token plus any rc_mode marker), and for
+// student-role identities loads the student record into the request context.
 func (a *App) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := a.claimsFromRequest(r)
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "authentication required")
+			a.unauthorized(w, r, http.StatusUnauthorized, "authentication required", errCodeAuth)
 			return
+		}
+		// Sliding refresh: mint a replacement token when the current one is
+		// within renewThreshold of expiry. It is stamped from the parsed (clean)
+		// claims, so mode state never travels in the token; effectiveClaims
+		// re-applies the rc_mode marker below.
+		if c.ExpiresAt != nil && time.Until(c.ExpiresAt.Time) < renewThreshold {
+			if tok, err := a.issueToken(c.Email, c.Role, c.StudentID); err == nil {
+				a.setSessionCookie(w, tok)
+				// Keep the marker's lifetime aligned with the fresh token.
+				if mode, err := r.Cookie(modeCookieName); err == nil && mode.Value != "" {
+					a.setModeCookie(w, mode.Value)
+				}
+			}
 		}
 		c = a.effectiveClaims(w, r, c)
 		ctx := context.WithValue(r.Context(), ctxKeyClaims{}, c)
 		if c.Role == RoleStudent {
 			s, err := a.StudentByID(r.Context(), c.StudentID)
 			if err != nil || s == nil || !s.Active {
-				writeErr(w, http.StatusForbidden, "account disabled")
+				a.unauthorized(w, r, http.StatusForbidden, "account disabled", errCodeDisabled)
 				return
 			}
 			ctx = context.WithValue(ctx, ctxKeyStudent{}, s)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// unauthorized answers an auth failure according to who asked: API routes get
+// JSON (the client interceptor reacts), page routes get a redirect to the
+// login page. Browsers navigating to a gated page never see a raw JSON blob.
+func (a *App) unauthorized(w http.ResponseWriter, r *http.Request, status int, msg, code string) {
+	if strings.HasPrefix(r.URL.Path, "/api") {
+		writeJSON(w, status, map[string]string{"error": msg, "code": code})
+		return
+	}
+	http.Redirect(w, r, a.cfg.PublicURL+"/auth/login", http.StatusFound)
 }
 
 // effectiveClaims narrows an admin token to the admin's scratch student
@@ -118,7 +165,13 @@ func (a *App) effectiveClaims(w http.ResponseWriter, r *http.Request, c *claims)
 		a.clearModeCookie(w)
 		return c
 	}
-	return &claims{Email: c.Email, Role: RoleStudent, StudentID: s.ID, Scratch: true}
+	return &claims{
+		Email:            c.Email,
+		Role:             RoleStudent,
+		StudentID:        s.ID,
+		Scratch:          true,
+		RegisteredClaims: c.RegisteredClaims,
+	}
 }
 
 type ctxKeyClaims struct{}

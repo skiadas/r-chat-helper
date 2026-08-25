@@ -6,12 +6,13 @@ import (
 )
 
 // requireAdmin gates a handler to instructors (the admin role issued on
-// sign-in for RC_ADMIN_EMAILS).
+// sign-in for RC_ADMIN_EMAILS). Like authenticate, it answers API clients
+// with JSON but redirects a browser on a page route.
 func (a *App) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := claimsOf(r)
 		if c == nil || c.Role != RoleAdmin {
-			writeErr(w, http.StatusForbidden, "instructor access required")
+			a.unauthorized(w, r, http.StatusForbidden, "instructor access required", errCodeAdmin)
 			return
 		}
 		next.ServeHTTP(w, r)

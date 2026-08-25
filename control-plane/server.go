@@ -21,6 +21,12 @@ func (a *App) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /auth/callback", a.handleOIDCCallback)
 	mux.HandleFunc("GET /logout", a.handleLogout)
 
+	// Page routes for entering and leaving the instructor's test session. They
+	// live outside the /api namespace so browsers navigating to them get a
+	// redirect to /auth/login on a lapsed session, never raw JSON.
+	mux.Handle("GET /test-student", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminScratchLogin))))
+	mux.Handle("GET /back-to-admin", a.authenticate(http.HandlerFunc(a.handleAdminScratchReturn)))
+
 	mux.Handle("GET /api/me", a.authenticate(http.HandlerFunc(a.handleMe)))
 	mux.Handle("GET /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleListSessions)))
 	mux.Handle("POST /api/me/sessions", a.authenticate(http.HandlerFunc(a.handleCreateSession)))
@@ -37,8 +43,6 @@ func (a *App) Run(ctx context.Context) error {
 	mux.Handle("PATCH /api/admin/students/{id}", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminUpdateStudent))))
 	mux.Handle("GET /api/admin/sessions", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminListSessions))))
 	mux.Handle("GET /api/admin/sessions/{id}/messages", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminSessionMessages))))
-	mux.Handle("GET /api/admin/scratch-login", a.authenticate(a.requireAdmin(http.HandlerFunc(a.handleAdminScratchLogin))))
-	mux.Handle("GET /api/admin/scratch-return", a.authenticate(http.HandlerFunc(a.handleAdminScratchReturn)))
 
 	mux.Handle("/", uiHandler())
 
@@ -117,8 +121,9 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Role == RoleAdmin {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"email": c.Email,
-			"role":  RoleAdmin,
+			"email":      c.Email,
+			"role":       RoleAdmin,
+			"expires_at": expUnix(c),
 		})
 		return
 	}
@@ -140,6 +145,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		"budget_usd":    float64(s.BudgetMicros) / 1e6,
 		"spent_usd":     float64(spent) / 1e6,
 		"remaining_usd": float64(s.BudgetMicros-spent) / 1e6,
+		"expires_at":    expUnix(c),
 	})
 }
 
