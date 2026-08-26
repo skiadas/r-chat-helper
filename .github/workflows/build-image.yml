@@ -10,7 +10,32 @@ permissions:
   packages: write
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: control-plane/go.mod
+          cache: true
+
+      - name: Install esbuild
+        run: npm install -g esbuild
+
+      - name: Vet
+        working-directory: control-plane
+        run: go vet ./...
+
+      # go test runs the UI module-graph check (ui_check_test.go), which
+      # bundles the pages' inline module scripts via esbuild and fails on any
+      # missing export or unresolved specifier.
+      - name: Test
+        working-directory: control-plane
+        run: go test ./...
+
   build:
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

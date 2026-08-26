@@ -3,13 +3,13 @@ export const $ = (s, el=document) => el.querySelector(s);
 // draft and expired park state across a lapsed session in sessionStorage, so
 // a forced sign-in never destroys work: a message mid-send or text left in
 // the compose box is restored on the next successful login.
-const draft = {
+export const draft = {
   key: "rc_draft",
   save(v) { if (v) sessionStorage.setItem(this.key, v); },
   take() { const v = sessionStorage.getItem(this.key) || ""; sessionStorage.removeItem(this.key); return v; },
   clearIf(v) { if (v == null || sessionStorage.getItem(this.key) === v) sessionStorage.removeItem(this.key); },
 };
-const expired = {
+export const expired = {
   key: "rc_expired",
   set() { sessionStorage.setItem(this.key, "1"); },
   once() { const v = sessionStorage.getItem(this.key) === "1"; sessionStorage.removeItem(this.key); return v; },
