@@ -402,7 +402,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request) {
 	if ses != nil {
 		summary = ses.Summary
 	}
-	resp, err := a.client.send(r.Context(), msgs, summary)
+	resp, err := a.client.send(r.Context(), sid, msgs, summary)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "model request failed: "+err.Error())
 		return

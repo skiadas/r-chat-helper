@@ -11,6 +11,10 @@ import (
 
 const defaultUpstream = "https://opencode.ai/zen/go/v1"
 
+// userAgent identifies this program to the upstream; used for both the
+// User-Agent header and the X-Opencode-Client attribution header.
+const userAgent = "r-chat-helper"
+
 // goClient talks to the shared class upstream (opencode.ai/zen/go/v1) as an
 // OpenAI-compatible chat/completions endpoint, injecting the configured class
 // key as the Bearer token. One client serves all students.
@@ -203,13 +207,16 @@ Keep answers short and focused. Answer the specific question asked; use at most 
 // send runs one full turn: it may loop to execute webfetch calls the model
 // requests, bounded by maxTools. suggest_new_topic is a signal, never
 // executed; the turn records it as NewTopic.
-func (c *goClient) send(ctx context.Context, msgs []Message, summary string) (*turn, error) {
+func (c *goClient) send(ctx context.Context, sessionID string, msgs []Message, summary string) (*turn, error) {
 	var tools []toolResult
 	var total usage
 	var newTopic bool
+	// One request id per turn, stable across the tool loop, so the upstream can
+	// correlate the requests that answer a single student message.
+	requestID := newID()
 
 	for i := 0; i < c.maxTools; i++ {
-		req, err := c.buildRequest(ctx, msgs, tools, summary)
+		req, err := c.buildRequest(ctx, sessionID, requestID, msgs, tools, summary)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +270,7 @@ func (c *goClient) send(ctx context.Context, msgs []Message, summary string) (*t
 // messages. It uses a tiny max_tokens cap and no tools so it stays cheap; the
 // returned usage is priced like any other interaction. On failure it returns
 // an empty title (the session simply stays unnamed).
-func (c *goClient) titleFor(ctx context.Context, msgs []Message) (*turn, error) {
+func (c *goClient) titleFor(ctx context.Context, sessionID string, msgs []Message) (*turn, error) {
 	maxTokens := 32
 	reqMsgs := make([]chatMessage, 0, len(msgs)+2)
 	reqMsgs = append(reqMsgs, chatMessage{Role: "system", Content: "You suggest concise titles for R tutoring conversations."})
@@ -271,7 +278,7 @@ func (c *goClient) titleFor(ctx context.Context, msgs []Message) (*turn, error) 
 		reqMsgs = append(reqMsgs, chatMessage{Role: m.Role, Content: truncate([]byte(m.Text), 500)})
 	}
 	reqMsgs = append(reqMsgs, chatMessage{Role: "user", Content: "Give this conversation a short title under 50 characters that captures its topic. Reply with only the title."})
-	resp, err := c.post(ctx, chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
+	resp, err := c.post(ctx, sessionID, newID(), chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +298,7 @@ func (c *goClient) titleFor(ctx context.Context, msgs []Message) (*turn, error) 
 // told to preserve exact artifacts and to mark anything uncertain rather than
 // guess, so the tutor that reads it later asks the student to re-paste rather
 // than over-claim.
-func (c *goClient) summaryFor(ctx context.Context, msgs []Message) (*turn, error) {
+func (c *goClient) summaryFor(ctx context.Context, sessionID string, msgs []Message) (*turn, error) {
 	maxTokens := 256
 	reqMsgs := make([]chatMessage, 0, len(msgs)+2)
 	reqMsgs = append(reqMsgs, chatMessage{Role: "system", Content: "You write concise carry-forward summaries of R tutoring conversations so the tutor can continue helping without the full history. Preserve exact artifacts: variable names, code snippets, error messages, packages and data sets, and any unresolved threads. The summary is best-effort: if a detail is uncertain, say so instead of guessing."})
@@ -299,7 +306,7 @@ func (c *goClient) summaryFor(ctx context.Context, msgs []Message) (*turn, error
 		reqMsgs = append(reqMsgs, chatMessage{Role: m.Role, Content: truncate([]byte(m.Text), 2000)})
 	}
 	reqMsgs = append(reqMsgs, chatMessage{Role: "user", Content: "Write a summary of this R tutoring conversation for a continuing session. Keep it under roughly 200 words. Preserve exact code, variable names, error messages, packages, and data sets, and note any unanswered questions. Mark anything uncertain as uncertain rather than guessing."})
-	resp, err := c.post(ctx, chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
+	resp, err := c.post(ctx, sessionID, newID(), chatReq{Model: c.model, Messages: reqMsgs, Stream: false, MaxTokens: &maxTokens})
 	if err != nil {
 		return nil, err
 	}
@@ -313,27 +320,28 @@ func (c *goClient) summaryFor(ctx context.Context, msgs []Message) (*turn, error
 
 // post marshals a request body, hits /chat/completions with the class key, and
 // returns the parsed response.
-func (c *goClient) post(ctx context.Context, body chatReq) (*chatResp, error) {
-	b, err := json.Marshal(body)
+func (c *goClient) post(ctx context.Context, sessionID, requestID string, body chatReq) (*chatResp, error) {
+	req, err := c.newChatRequest(ctx, sessionID, requestID, body)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", strings.NewReader(string(b)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.key)
 	return c.doOnce(ctx, req)
 }
 
-func (c *goClient) buildRequest(ctx context.Context, msgs []Message, tools []toolResult, summary string) (*http.Request, error) {
+func (c *goClient) buildRequest(ctx context.Context, sessionID, requestID string, msgs []Message, tools []toolResult, summary string) (*http.Request, error) {
 	body := chatReq{
 		Model:    c.model,
 		Messages: c.toOpenAIMessages(msgs, tools, summary),
 		Tools:    c.tools(),
 		Stream:   false,
 	}
+	return c.newChatRequest(ctx, sessionID, requestID, body)
+}
+
+// newChatRequest builds a chat/completions request with the class key and the
+// OpenCode Go attribution headers. sessionID is the stable per-conversation id
+// and requestID is unique per turn; both are omitted when empty.
+func (c *goClient) newChatRequest(ctx context.Context, sessionID, requestID string, body chatReq) (*http.Request, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -344,6 +352,14 @@ func (c *goClient) buildRequest(ctx context.Context, msgs []Message, tools []too
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.key)
+	req.Header.Set("X-Opencode-Client", userAgent)
+	req.Header.Set("User-Agent", userAgent)
+	if sessionID != "" {
+		req.Header.Set("X-Opencode-Session", sessionID)
+	}
+	if requestID != "" {
+		req.Header.Set("X-Opencode-Request", requestID)
+	}
 	return req, nil
 }
 

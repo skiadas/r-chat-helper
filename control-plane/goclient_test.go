@@ -10,20 +10,29 @@ import (
 )
 
 // fakeUpstream is a minimal OpenAI-compatible chat endpoint that records the
-// Authorization header and can answer with a tool call then a final answer.
+// Authorization and OpenCode Go attribution headers and can answer with a tool
+// call then a final answer.
 type fakeUpstream struct {
-	mu         sync.Mutex
-	authHeader string
-	models     []string
-	requests   int
-	toolResult string
-	fetchBody  string
+	mu             sync.Mutex
+	authHeader     string
+	sessionHeaders []string
+	requestHeaders []string
+	clientHeader   string
+	uaHeader       string
+	models         []string
+	requests       int
+	toolResult     string
+	fetchBody      string
 }
 
 func (f *fakeUpstream) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.authHeader = r.Header.Get("Authorization")
+		f.sessionHeaders = append(f.sessionHeaders, r.Header.Get("X-Opencode-Session"))
+		f.requestHeaders = append(f.requestHeaders, r.Header.Get("X-Opencode-Request"))
+		f.clientHeader = r.Header.Get("X-Opencode-Client")
+		f.uaHeader = r.Header.Get("User-Agent")
 		f.requests++
 		defer f.mu.Unlock()
 
@@ -87,7 +96,7 @@ func TestClientInjectsConfiguredKeyAndForcesModel(t *testing.T) {
 	cfg.WebFetchEnabled = true
 	c := newGoClient(cfg)
 
-	tr, err := c.send(t.Context(), nil, "")
+	tr, err := c.send(t.Context(), "sess-1", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +105,15 @@ func TestClientInjectsConfiguredKeyAndForcesModel(t *testing.T) {
 
 	if f.authHeader != "Bearer sk-class-xyz" {
 		t.Fatalf("auth header = %q, want the configured class key", f.authHeader)
+	}
+	if len(f.sessionHeaders) != 2 || f.sessionHeaders[0] != "sess-1" || f.sessionHeaders[1] != "sess-1" {
+		t.Fatalf("session headers = %v, want [sess-1 sess-1] (stable across the turn)", f.sessionHeaders)
+	}
+	if len(f.requestHeaders) != 2 || f.requestHeaders[0] == "" || f.requestHeaders[0] != f.requestHeaders[1] {
+		t.Fatalf("request headers = %v, want one stable id across the turn", f.requestHeaders)
+	}
+	if f.clientHeader != "r-chat-helper" || f.uaHeader != "r-chat-helper" {
+		t.Fatalf("client=%q ua=%q, want r-chat-helper", f.clientHeader, f.uaHeader)
 	}
 	if len(f.models) == 0 || f.models[0] != LockedModelID {
 		t.Fatalf("model = %v, want locked model", f.models)
@@ -203,7 +221,7 @@ func TestSendRecordsNewTopicSignalWithoutExecutingIt(t *testing.T) {
 	cfg.WebFetchEnabled = false
 	c := newGoClient(cfg)
 
-	tr, err := c.send(t.Context(), []Message{{Role: "user", Text: "now about ggplot2"}, {Role: "assistant", Text: "prev answer"}}, "")
+	tr, err := c.send(t.Context(), "sess-2", []Message{{Role: "user", Text: "now about ggplot2"}, {Role: "assistant", Text: "prev answer"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +265,7 @@ func TestSummaryForReturnsTextAndUsage(t *testing.T) {
 	cfg.ProviderKey = "k"
 	c := newGoClient(cfg)
 
-	tr, err := c.summaryFor(t.Context(), []Message{{Role: "user", Text: "lm(y~x)"}})
+	tr, err := c.summaryFor(t.Context(), "sess-3", []Message{{Role: "user", Text: "lm(y~x)"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +310,7 @@ func TestSendNoWebFetchStillOffersSuggestNewTopic(t *testing.T) {
 	cfg.ProviderKey = "k"
 	cfg.WebFetchEnabled = false
 	c := newGoClient(cfg)
-	if _, err := c.send(t.Context(), nil, ""); err != nil {
+	if _, err := c.send(t.Context(), "sess-4", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }

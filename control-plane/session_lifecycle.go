@@ -53,7 +53,7 @@ func (a *App) startFromSummary(ctx context.Context, studentID, sourceID string) 
 	summary := ""
 	if len(msgs) > 0 {
 		genCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		resp, err := a.client.summaryFor(genCtx, msgs)
+		resp, err := a.client.summaryFor(genCtx, sourceID, msgs)
 		cancel()
 		if err != nil {
 			log.Printf("summary: generation failed for %s: %v", sourceID, err)
@@ -133,7 +133,7 @@ func (a *App) titleSession(studentID, sessionID string) {
 		log.Printf("title: failed to load messages for %s: %v", sessionID, err)
 		return
 	}
-	resp, err := a.client.titleFor(ctx, msgs)
+	resp, err := a.client.titleFor(ctx, sessionID, msgs)
 	if err != nil {
 		log.Printf("title: generation failed for %s: %v", sessionID, err)
 		return
